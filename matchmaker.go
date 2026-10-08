@@ -23,10 +23,11 @@ import (
 const matchmakingSearchWindow = 45 * time.Second
 
 type searchRecord struct {
-	owner    string
-	ticket   *mm.MatchmakingTicket
-	created  time.Time
-	tracking bool
+	owner        string
+	ticket       *mm.MatchmakingTicket
+	created      time.Time
+	tracking     bool
+	trackContext context.Context
 }
 
 type matchmakerServer struct {
@@ -168,31 +169,47 @@ func (m *matchmakerServer) CreateMatchmakingTicket(ctx context.Context, r *mm.Cr
 	return proto.Clone(t).(*mm.MatchmakingTicket), nil
 }
 
-// Both tickets must have active trackers: a cancelled/disconnected search
-// cannot be reserved by another client. Called with m.mu held.
-func (m *matchmakerServer) assignPair(r *searchRecord) error {
+// Assign four active searches immediately, or the available participants when
+// the oldest search reaches its deadline. Called with m.mu held.
+func (m *matchmakerServer) assignGroup(r *searchRecord) error {
+	pool := searchPool(r.ticket)
+	if pool == "" {
+		return nil
+	}
+
 	all := []*searchRecord{}
 
 	for _, v := range m.tickets {
 		if v.tracking &&
+			(v.trackContext == nil || v.trackContext.Err() == nil) &&
 			v.ticket.State == mm.MatchmakingTicket_SEARCHING &&
-			time.Since(v.created) < matchmakingSearchWindow &&
-			searchPool(v.ticket) == searchPool(r.ticket) {
+			searchPool(v.ticket) == pool {
 			all = append(all, v)
 		}
 	}
 
-	if len(all) < 2 {
+	if len(all) == 0 {
 		return nil
 	}
 
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].created.Before(all[j].created)
 	})
-	all = all[:2]
+	participants := all[:0]
+	owners := map[string]bool{}
+	for _, candidate := range all {
+		if !owners[candidate.owner] {
+			owners[candidate.owner] = true
+			participants = append(participants, candidate)
+		}
+	}
+	all = participants
 
-	if all[0].owner == all[1].owner {
+	if len(all) < 4 && time.Since(all[0].created) < matchmakingSearchWindow {
 		return nil
+	}
+	if len(all) > 4 {
+		all = all[:4]
 	}
 
 	id, err := randomResourceID()
@@ -204,7 +221,7 @@ func (m *matchmakerServer) assignPair(r *searchRecord) error {
 	gs := &mm.GameSession{
 		Name:                    "tenants/t-adf89f68-lp1/gameSessions/" + id,
 		MaxParticipantCount:     4,
-		CurrentParticipantCount: 2,
+		CurrentParticipantCount: int32(len(all)),
 		CanParticipate:          true,
 		IsPublic:                true,
 		State:                   mm.GameSession_CREATING,
@@ -282,7 +299,7 @@ func (m *matchmakerServer) assignPair(r *searchRecord) error {
 
 	m.rooms.p.event(map[string]any{
 		"event":    "matchmaking_humans_assigned",
-		"players":  2,
+		"players":  len(all),
 		"capacity": 4,
 	})
 
@@ -324,10 +341,12 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mm.TrackMatchmakingTicket
 	}
 
 	r.tracking = true
+	r.trackContext = stream.Context()
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
 		r.tracking = false
+		r.trackContext = nil
 
 		if r.ticket.State == mm.MatchmakingTicket_SEARCHING {
 			r.ticket.State = mm.MatchmakingTicket_CANCELLED
@@ -342,18 +361,24 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mm.TrackMatchmakingTicket
 	previous := mm.MatchmakingTicket_STATE_UNSPECIFIED
 
 	for {
+		if err := stream.Context().Err(); err != nil {
+			return err
+		}
+
 		m.mu.Lock()
 
 		if r.ticket.State == mm.MatchmakingTicket_SEARCHING {
-			if time.Since(r.created) >= matchmakingSearchWindow {
+			if err := m.assignGroup(r); err != nil {
+				m.mu.Unlock()
+
+				return err
+			}
+
+			if r.ticket.State == mm.MatchmakingTicket_SEARCHING && time.Since(r.created) >= matchmakingSearchWindow {
 				r.ticket.State = mm.MatchmakingTicket_TIMED_OUT
 				m.rooms.p.event(map[string]any{
 					"event": "matchmaking_search_timed_out",
 				})
-			} else if err := m.assignPair(r); err != nil {
-				m.mu.Unlock()
-
-				return err
 			}
 		}
 
