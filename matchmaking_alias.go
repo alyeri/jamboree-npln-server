@@ -25,6 +25,20 @@ func canonicalRoom(name string) string {
 	return name
 }
 
+func roomAccessible(r *creationRecord, caller string) bool {
+	if r.owner == caller || discoverableRoom(r) {
+		return true
+	}
+
+	for _, participant := range r.ticket.GetGameSession().GetUserSessions() {
+		if canonicalUserSession(participant.GetUser()) == canonicalUserSession(caller) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (s *gameSessionServer) CreateGameSessionShortAlias(ctx context.Context, req *mm.CreateGameSessionShortAliasRequest) (*mm.GameSessionShortAlias, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
 	if e != nil {
@@ -44,7 +58,7 @@ func (s *gameSessionServer) CreateGameSessionShortAlias(ctx context.Context, req
 	var rec *creationRecord
 
 	for _, r := range s.tickets {
-		if r.expires.After(time.Now()) && r.ticket.GetGameSession().GetName() == room && (r.owner == owner || discoverableRoom(r)) {
+		if r.expires.After(time.Now()) && r.ticket.GetGameSession().GetName() == room && roomAccessible(r, owner) {
 			rec = r
 			break
 		}
@@ -147,7 +161,7 @@ func (s *gameSessionServer) GetGameSession(ctx context.Context, req *mm.GetGameS
 	defer s.mu.Unlock()
 
 	for _, r := range s.tickets {
-		if r.expires.After(time.Now()) && r.ticket.GetGameSession().GetName() == name && (r.owner == owner || discoverableRoom(r)) {
+		if r.expires.After(time.Now()) && r.ticket.GetGameSession().GetName() == name && roomAccessible(r, owner) {
 			s.p.event(map[string]any{
 				"event":            "room_session_read",
 				"password_present": r.ticket.GameSession.Password != "",
