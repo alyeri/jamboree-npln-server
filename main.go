@@ -43,12 +43,13 @@ type rpcState struct {
 }
 
 type serverContext struct {
-	capture     *rpcCapture
-	identityKey []byte
-	accountIDs  map[string]string
-	mu          sync.Mutex
-	writer      io.Writer
-	next        atomic.Uint64
+	prearrangedTokens prearrangedTokenCache
+	capture           *rpcCapture
+	identityKey       []byte
+	accountIDs        map[string]string
+	mu                sync.Mutex
+	writer            io.Writer
+	next              atomic.Uint64
 }
 
 func (p *serverContext) event(e map[string]any) {

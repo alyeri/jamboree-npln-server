@@ -152,6 +152,10 @@ func (s *authServer) CreateUser(ctx context.Context, req *authpb.CreateUserReque
 		s.state.mu.Unlock()
 	}
 
+	if s.state != nil {
+		s.state.prearrangedTokens.remember(ext.GetNsaIdToken())
+	}
+
 	return &authpb.User{
 		Name:    parent + "/users/" + id,
 		Account: parent,

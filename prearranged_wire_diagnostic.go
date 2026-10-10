@@ -15,8 +15,8 @@ import (
 	authpb "github.com/alyeri/jamboree-npln-server/proto/auth/v1"
 )
 
-// Keep protobuf behavior unchanged. Inspect only field numbers, wire types and sizes
-// when this particular request cannot be decoded; never retain authentication bytes.
+// Retain normal protobuf behavior. For this request alone, recover bounded
+// trailing garbage only when the complete token was already accepted by Auth.
 type prearrangedDiagnosticCodec struct {
 	p     *serverContext
 	count atomic.Uint64
@@ -32,6 +32,21 @@ func (*prearrangedDiagnosticCodec) Marshal(v any) ([]byte, error) {
 
 func (c *prearrangedDiagnosticCodec) Unmarshal(b []byte, v any) error {
 	err := proto.Unmarshal(b, v.(proto.Message))
+	if request, ok := v.(*authpb.IssuePrearrangedUserTokenRequest); ok && err != nil && c.p != nil && strings.Contains(err.Error(), "UTF-8") {
+		fixed, removed := c.p.prearrangedTokens.repair(b)
+		if fixed != nil {
+			candidate := &authpb.IssuePrearrangedUserTokenRequest{}
+			if decodeErr := proto.Unmarshal(fixed, candidate); decodeErr == nil {
+				proto.Reset(request)
+				proto.Merge(request, candidate)
+				c.p.event(map[string]any{
+					"event":         "prearranged_token_padding_recovered",
+					"removed_bytes": removed,
+				})
+				return nil
+			}
+		}
+	}
 
 	if _, ok := v.(*authpb.IssuePrearrangedUserTokenRequest); ok && err != nil && c.armed() && c.count.Add(1) <= 256 {
 		c.p.event(map[string]any{
