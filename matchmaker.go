@@ -28,6 +28,7 @@ type searchRecord struct {
 	created      time.Time
 	tracking     bool
 	trackContext context.Context
+	trackers     map[string]context.Context
 }
 
 type matchmakerServer struct {
@@ -48,9 +49,9 @@ func randomResourceID() (string, error) {
 }
 
 func searchPool(t *mm.MatchmakingTicket) string {
-	// Local Survival policy: exact mode/settings; skill is retained, not used
+	// Match exact mode/settings; skill is retained, not used
 	// to claim an undocumented Nintendo skill-range contract.
-	if t == nil || len(t.UserDefinitions) != 1 || t.UserDefinitions[0] == nil {
+	if t == nil || len(t.UserDefinitions) == 0 || t.UserDefinitions[0] == nil {
 		return ""
 	}
 
@@ -61,6 +62,24 @@ func searchPool(t *mm.MatchmakingTicket) string {
 	}
 
 	return t.MatchmakingConfig + "/" + mode.String()
+}
+
+func activeSearch(r *searchRecord) bool {
+	if !r.tracking {
+		return false
+	}
+
+	if len(r.trackers) == 0 {
+		return r.trackContext == nil || r.trackContext.Err() == nil
+	}
+
+	for _, ctx := range r.trackers {
+		if ctx.Err() == nil {
+			return true
+		}
+	}
+
+	return false
 }
 
 func canonicalSearchTicket(name string) string {
@@ -87,6 +106,7 @@ func canonicalSearchTicket(name string) string {
 
 func (m *matchmakerServer) CreateMatchmakingTicket(ctx context.Context, r *mm.CreateMatchmakingTicketRequest) (*mm.MatchmakingTicket, error) {
 	owner, err := callerIdentity(ctx, m.rooms.p.identityKey)
+
 	if err != nil {
 		return nil, err
 	}
@@ -97,40 +117,80 @@ func (m *matchmakerServer) CreateMatchmakingTicket(ctx context.Context, r *mm.Cr
 		return nil, status.Error(codes.InvalidArgument, "Jamboree tenant required")
 	}
 
-	if len(r.GetUserDelegationTokens()) != 0 {
-		return nil, status.Error(codes.Unimplemented, "delegated search unsupported")
-	}
-
 	in := r.GetMatchmakingTicket()
 
 	if in == nil || proto.Size(in) > 64*1024 {
 		return nil, status.Error(codes.InvalidArgument, "search ticket required")
 	}
 
-	if matchmakingConfigID(in.MatchmakingConfig) != "BqP4MatchmakingConfigs" || in.Backfill != nil || in.GameSession != nil {
+	config := matchmakingConfigID(in.MatchmakingConfig)
+
+	supportedConfig := config == "BqP4MatchmakingConfigs" ||
+		config == "BqP4NoEasePaticipantConfigs" ||
+		config == "BqP8MatchmakingConfigs" ||
+		config == "BqP20MatchmakingConfigs"
+
+	if !supportedConfig || in.Backfill != nil || in.GameSession != nil {
 		return nil, status.Error(codes.Unimplemented, "search configuration unsupported")
 	}
 
-	if len(in.UserDefinitions) != 1 || in.UserDefinitions[0] == nil {
-		return nil, status.Error(codes.InvalidArgument, "one local user required")
+	if len(in.UserDefinitions) < 1 || len(in.UserDefinitions) > 2 {
+		return nil, status.Error(codes.InvalidArgument, "one user or one pair required")
 	}
 
 	t := proto.Clone(in).(*mm.MatchmakingTicket)
-	d := t.UserDefinitions[0]
+	t.UserDefinitions, err = m.rooms.authorizeSearchUsers(owner, in.UserDefinitions, r.UserDelegationTokens)
 
-	if d.User != "" && d.User != "users/current" && !strings.HasSuffix(d.User, "/users/current") && canonicalUserSession(d.User) != owner {
-		return nil, status.Error(codes.PermissionDenied, "search user must match caller")
+	if err != nil {
+		return nil, err
 	}
+
+	d := t.UserDefinitions[0]
 
 	mode := d.GetAttributes().GetFields()["gameMode"]
 
-	if mode == nil || (mode.GetIntegerValue() != 34308 && mode.GetIntegerValue() != 1344260 && mode.GetIntegerValue() != 33284) {
+	// Daily Challenges uses 0x8304 in the low word and a varying challenge
+	// identifier in the high word. Keep the full value for pool matching.
+	modeID := mode.GetIntegerValue()
+	dailyChallenge := modeID >= 0 && modeID <= 0xffffffff && modeID&0xffff == 0x8304
+
+	// Captured Kaboom request: BqP8MatchmakingConfigs, gameMode 0x18804.
+	// Preserve the settings in the high word when matching search pools.
+	kaboom := modeID >= 0 && modeID <= 0xffffffff && modeID&0xffff == 0x8804
+
+	// Citron's captured Koopathlon request uses BqP20, gameMode 34564 (0x8704).
+	// Preserve the complete settings value in searchPool, as in the other modes.
+	koopathlon := modeID >= 0 && modeID <= 0xffffffff && modeID&0xffff == 0x8704
+
+	// Captured board searches: Goomba Lagoon Party 0x8004, Pro 0x8104;
+	// Mega Wiggler's Tree Party Party 0x68004. The high word carries board
+	// settings; preserve the complete uint32 mode to isolate search pools.
+	partyBoard := modeID >= 0 && modeID <= 0xffffffff && (modeID&0xffff == 0x8004 || modeID&0xffff == 0x8104)
+
+	if mode == nil ||
+		(modeID != 34308 && modeID != 33284 && modeID != 33796 &&
+			!dailyChallenge && !kaboom && !koopathlon && !partyBoard) {
 		return nil, status.Error(codes.Unimplemented, "matchmaking mode unsupported")
 	}
 
-	d.User = owner
-	t.MatchmakingConfig = "tenants/t-adf89f68-lp1/matchmakingConfigs/BqP4MatchmakingConfigs"
+	tagMatch := modeID == 33796 && config == "BqP4NoEasePaticipantConfigs"
+
+	if koopathlon != (config == "BqP20MatchmakingConfigs") ||
+		kaboom != (config == "BqP8MatchmakingConfigs") ||
+		(modeID == 33796) != (config == "BqP4NoEasePaticipantConfigs") ||
+		(len(t.UserDefinitions) > 1 && !tagMatch) {
+		return nil, status.Error(codes.InvalidArgument, "mode and group configuration disagree")
+	}
+
+	for _, definition := range t.UserDefinitions {
+		if !proto.Equal(mode, definition.GetAttributes().GetFields()["gameMode"]) {
+			return nil, status.Error(codes.InvalidArgument, "group modes must agree")
+		}
+	}
+
+	t.MatchmakingConfig = "tenants/t-adf89f68-lp1/matchmakingConfigs/" + config
 	id, err := randomResourceID()
+
 	if err != nil {
 		return nil, err
 	}
@@ -158,10 +218,14 @@ func (m *matchmakerServer) CreateMatchmakingTicket(ctx context.Context, r *mm.Cr
 		return nil, status.Error(codes.ResourceExhausted, "search ticket limit reached")
 	}
 
-	m.tickets[t.Name] = &searchRecord{owner: owner, ticket: t, created: time.Now()}
+	m.tickets[t.Name] = &searchRecord{
+		owner:   owner,
+		ticket:  t,
+		created: time.Now(),
+	}
 	m.rooms.p.event(map[string]any{
 		"event":           "matchmaking_search_created",
-		"players":         1,
+		"players":         len(t.UserDefinitions),
 		"timeout_seconds": 45,
 		"game_mode":       mode.GetIntegerValue(),
 	})
@@ -169,10 +233,11 @@ func (m *matchmakerServer) CreateMatchmakingTicket(ctx context.Context, r *mm.Cr
 	return proto.Clone(t).(*mm.MatchmakingTicket), nil
 }
 
-// Assign four active searches immediately, or the available participants when
+// Assign the configured capacity immediately, or the available participants when
 // the oldest search reaches its deadline. Called with m.mu held.
 func (m *matchmakerServer) assignGroup(r *searchRecord) error {
 	pool := searchPool(r.ticket)
+
 	if pool == "" {
 		return nil
 	}
@@ -180,8 +245,7 @@ func (m *matchmakerServer) assignGroup(r *searchRecord) error {
 	all := []*searchRecord{}
 
 	for _, v := range m.tickets {
-		if v.tracking &&
-			(v.trackContext == nil || v.trackContext.Err() == nil) &&
+		if activeSearch(v) &&
 			v.ticket.State == mm.MatchmakingTicket_SEARCHING &&
 			searchPool(v.ticket) == pool {
 			all = append(all, v)
@@ -195,24 +259,60 @@ func (m *matchmakerServer) assignGroup(r *searchRecord) error {
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].created.Before(all[j].created)
 	})
-	participants := all[:0]
-	owners := map[string]bool{}
-	for _, candidate := range all {
-		if !owners[candidate.owner] {
-			owners[candidate.owner] = true
-			participants = append(participants, candidate)
-		}
-	}
-	all = participants
+	capacity := 4
 
-	if len(all) < 4 && time.Since(all[0].created) < matchmakingSearchWindow {
+	if matchmakingConfigID(r.ticket.MatchmakingConfig) == "BqP8MatchmakingConfigs" {
+		capacity = 8
+	}
+
+	if matchmakingConfigID(r.ticket.MatchmakingConfig) == "BqP20MatchmakingConfigs" {
+		capacity = 20
+	}
+
+	participants := make([]*searchRecord, 0, capacity)
+	users := map[string]bool{}
+	count := 0
+
+	for _, candidate := range all {
+		duplicate := false
+
+		for _, d := range candidate.ticket.UserDefinitions {
+			duplicate = duplicate || users[d.User]
+		}
+
+		size := len(candidate.ticket.UserDefinitions)
+
+		if duplicate || count+size > capacity {
+			continue
+		}
+
+		for _, d := range candidate.ticket.UserDefinitions {
+			users[d.User] = true
+		}
+
+		participants = append(participants, candidate)
+		count += size
+	}
+
+	if len(participants) == 0 {
 		return nil
 	}
-	if len(all) > 4 {
-		all = all[:4]
+
+	all = participants
+
+	// A lone Tag Match pair is the requesting team, not an opponent.
+	// Report the native timeout instead of replacing its companion session
+	// with a successful match against itself; the client owns CPU fallback.
+	if matchmakingConfigID(r.ticket.MatchmakingConfig) == "BqP4NoEasePaticipantConfigs" && count < 4 {
+		return nil
+	}
+
+	if count < capacity && time.Since(all[0].created) < matchmakingSearchWindow {
+		return nil
 	}
 
 	id, err := randomResourceID()
+
 	if err != nil {
 		return err
 	}
@@ -220,8 +320,8 @@ func (m *matchmakerServer) assignGroup(r *searchRecord) error {
 	now := timestamppb.Now()
 	gs := &mm.GameSession{
 		Name:                    "tenants/t-adf89f68-lp1/gameSessions/" + id,
-		MaxParticipantCount:     4,
-		CurrentParticipantCount: int32(len(all)),
+		MaxParticipantCount:     int32(capacity),
+		CurrentParticipantCount: int32(count),
 		CanParticipate:          true,
 		IsPublic:                true,
 		State:                   mm.GameSession_CREATING,
@@ -230,43 +330,52 @@ func (m *matchmakerServer) assignGroup(r *searchRecord) error {
 		CreateTime:              now,
 		Properties: &common.MapValue{
 			Fields: map[string]*common.Value{
-				"_BaseConfigName": textValue("BqP4MatchmakingConfigs"),
+				"_BaseConfigName": textValue(matchmakingConfigID(all[0].ticket.MatchmakingConfig)),
 				"_AliasSuffix":    textValue(""),
 			},
 		},
 	}
 
 	defs := []*mm.UserDefinition{}
-	matched := []*mm.MatchedUserSession{}
+	matched := map[*searchRecord][]*mm.MatchedUserSession{}
 
 	for _, v := range all {
-		d := proto.Clone(v.ticket.UserDefinitions[0]).(*mm.UserDefinition)
-		defs = append(defs, d)
-		uid, e := randomResourceID()
-		if e != nil {
-			return e
-		}
+		for _, definition := range v.ticket.UserDefinitions {
+			d := proto.Clone(definition).(*mm.UserDefinition)
+			defs = append(defs, d)
+			uid, e := randomResourceID()
 
-		us := gs.Name + "/userSessions/" + uid
-		proof, e := (&authServer{key: m.rooms.p.identityKey}).signSessionToken(v.owner+"|"+us, "matchmaking", 15*time.Minute)
-		if e != nil {
-			return e
-		}
+			if e != nil {
+				return e
+			}
 
-		gs.UserSessions = append(gs.UserSessions, &mm.UserSession{
-			Name:        us,
-			User:        v.owner,
-			State:       mm.UserSession_RESERVED,
-			CreateTime:  now,
-			Attributes:  d.Attributes,
-			Team:        d.Team,
-			LatencyData: cloneLatencyData(d),
-		})
-		matched = append(matched, &mm.MatchedUserSession{
-			UserDefinition:     d,
-			UserSession:        us,
-			MatchmakingIdToken: proof,
-		})
+			us := gs.Name + "/userSessions/" + uid
+			proof, e := (&authServer{key: m.rooms.p.identityKey}).signSessionToken(d.User+"|"+us, "matchmaking", 15*time.Minute)
+
+			if e != nil {
+				return e
+			}
+
+			gs.UserSessions = append(gs.UserSessions, &mm.UserSession{
+				Name:        us,
+				User:        d.User,
+				State:       mm.UserSession_RESERVED,
+				CreateTime:  now,
+				Attributes:  d.Attributes,
+				Team:        d.Team,
+				LatencyData: cloneLatencyData(d),
+			})
+
+			if d.User != v.owner {
+				proof = ""
+			}
+
+			matched[v] = append(matched[v], &mm.MatchedUserSession{
+				UserDefinition:     d,
+				UserSession:        us,
+				MatchmakingIdToken: proof,
+			})
+		}
 	}
 
 	creation := &mm.GameSessionCreationTicket{
@@ -291,16 +400,16 @@ func (m *matchmakerServer) assignGroup(r *searchRecord) error {
 	}
 	m.rooms.mu.Unlock()
 
-	for i, v := range all {
+	for _, v := range all {
 		v.ticket.GameSession = proto.Clone(gs).(*mm.GameSession)
-		v.ticket.MatchedUserSessions = []*mm.MatchedUserSession{matched[i]}
+		v.ticket.MatchedUserSessions = matched[v]
 		v.ticket.State = mm.MatchmakingTicket_SUCCEEDED
 	}
 
 	m.rooms.p.event(map[string]any{
 		"event":    "matchmaking_humans_assigned",
-		"players":  len(all),
-		"capacity": 4,
+		"players":  count,
+		"capacity": capacity,
 	})
 
 	return nil
@@ -308,14 +417,20 @@ func (m *matchmakerServer) assignGroup(r *searchRecord) error {
 
 func (m *matchmakerServer) TrackMatchmakingTicket(req *mm.TrackMatchmakingTicketRequest, stream grpc.ServerStreamingServer[mm.MatchmakingTicket]) error {
 	owner, err := callerIdentity(stream.Context(), m.rooms.p.identityKey)
+
 	if err != nil {
 		return err
 	}
 
 	owner = canonicalUserSession(owner)
 
-	if len(req.UserDelegationTokens) > 0 {
-		return status.Error(codes.Unimplemented, "delegated tracking unsupported")
+	if _, err := m.rooms.delegatedParticipants(owner, req.UserDelegationTokens); err != nil {
+		m.rooms.p.event(map[string]any{
+			"event":  "matchmaking_tracking_rejected",
+			"reason": "invalid_delegation",
+		})
+
+		return err
 	}
 
 	name := canonicalSearchTicket(req.Name)
@@ -329,26 +444,52 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mm.TrackMatchmakingTicket
 	}
 
 	if r.owner != owner {
-		m.mu.Unlock()
+		participant := false
 
-		return status.Error(codes.PermissionDenied, "search belongs to another caller")
+		for _, definition := range r.ticket.UserDefinitions {
+			participant = participant || definition.User == owner
+		}
+
+		if !participant {
+			m.rooms.p.event(map[string]any{
+				"event":  "matchmaking_tracking_rejected",
+				"reason": "not_participant",
+			})
+			m.mu.Unlock()
+
+			return status.Error(codes.PermissionDenied, "caller is not a search participant")
+		}
 	}
 
-	if r.tracking {
+	if r.trackers == nil {
+		r.trackers = map[string]context.Context{}
+	}
+
+	if r.trackers[owner] != nil {
 		m.mu.Unlock()
 
 		return status.Error(codes.AlreadyExists, "search already tracked")
 	}
 
 	r.tracking = true
-	r.trackContext = stream.Context()
+	r.trackers[owner] = stream.Context()
+	r.trackContext = nil
+	m.rooms.p.event(map[string]any{
+		"event":           "matchmaking_search_tracking",
+		"creator":         owner == r.owner,
+		"active_trackers": len(r.trackers),
+	})
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
+		delete(r.trackers, owner)
 		r.tracking = false
-		r.trackContext = nil
 
-		if r.ticket.State == mm.MatchmakingTicket_SEARCHING {
+		for _, ctx := range r.trackers {
+			r.tracking = r.tracking || ctx.Err() == nil
+		}
+
+		if !r.tracking && r.ticket.State == mm.MatchmakingTicket_SEARCHING {
 			r.ticket.State = mm.MatchmakingTicket_CANCELLED
 		}
 
@@ -385,6 +526,22 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mm.TrackMatchmakingTicket
 		out := proto.Clone(r.ticket).(*mm.MatchmakingTicket)
 		m.mu.Unlock()
 
+		if out.State == mm.MatchmakingTicket_SUCCEEDED {
+			for _, matched := range out.MatchedUserSessions {
+				matched.MatchmakingIdToken = ""
+
+				if matched.GetUserDefinition().GetUser() == owner {
+					proof, err := (&authServer{key: m.rooms.p.identityKey}).signSessionToken(owner+"|"+matched.UserSession, "matchmaking", 15*time.Minute)
+
+					if err != nil {
+						return err
+					}
+
+					matched.MatchmakingIdToken = proof
+				}
+			}
+		}
+
 		if out.State != previous {
 			if err := stream.Send(out); err != nil {
 				return err
@@ -408,6 +565,7 @@ func (m *matchmakerServer) TrackMatchmakingTicket(req *mm.TrackMatchmakingTicket
 
 func (m *matchmakerServer) CancelMatchmakingTicket(ctx context.Context, req *mm.CancelMatchmakingTicketRequest) (*emptypb.Empty, error) {
 	owner, err := callerIdentity(ctx, m.rooms.p.identityKey)
+
 	if err != nil {
 		return nil, err
 	}

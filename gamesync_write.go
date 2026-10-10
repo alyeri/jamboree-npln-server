@@ -34,6 +34,72 @@ func cloneFields(fields *commonpb.MapValue) *commonpb.MapValue {
 	return out
 }
 
+// Tag Match participants republish their lobby metadata after the match.
+// This grants no access to admission flags, passwords, or configuration.
+func tagLobbyPropertiesUpdate(record *creationRecord, proof string, old *gspb.Document, op *gspb.WriteOperation) bool {
+	if matchmakingConfigID(record.ticket.GetMatchmakingConfig()) != "BqP4NoEasePaticipantConfigs" {
+		return false
+	}
+
+	parts := strings.Split(proof, "|")
+
+	if len(parts) != 2 {
+		return false
+	}
+
+	participant := false
+
+	for _, user := range record.ticket.GetGameSession().GetUserSessions() {
+		participant = participant || (user.User == parts[0] && user.Name == parts[1])
+	}
+
+	if !participant {
+		return false
+	}
+
+	update := op.GetUpdateDocument()
+
+	if update == nil || len(update.GetUpdateMask().GetPaths()) != 1 {
+		return false
+	}
+
+	path, err := fieldPath(update.UpdateMask.Paths[0])
+
+	if err != nil || len(path) != 1 || path[0] != "prp" {
+		return false
+	}
+
+	fields := update.GetDocument().GetFields().GetFields()
+
+	if len(fields) != 1 {
+		return false
+	}
+
+	properties := fields["prp"].GetMapValue()
+
+	if properties == nil {
+		return false
+	}
+
+	for key := range properties.GetFields() {
+		switch key {
+		case "_AliasSuffix", "_BaseConfigName", "_Bex_PropIsHost", "gameMode", "searchWord", "uniqueId":
+		default:
+			return false
+		}
+	}
+
+	previous := old.GetFields().GetFields()["prp"].GetMapValue()
+
+	for _, key := range []string{"_AliasSuffix", "_BaseConfigName", "gameMode"} {
+		if !proto.Equal(previous.GetFields()[key], properties.GetFields()[key]) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func fieldPath(path string) ([]string, error) {
 	var parts []string
 
@@ -469,9 +535,11 @@ func (s *gamesyncServer) WriteDocuments(ctx context.Context, req *gspb.WriteDocu
 			owner := false
 
 			for _, record := range s.rooms.tickets {
-				if record.ticket.GetGameSession().GetName() == room && record.owner == strings.Split(proof, "|")[0] {
-					owner = true
-					break
+				if record.ticket.GetGameSession().GetName() == room {
+					owner = record.owner == strings.Split(proof, "|")[0] || tagLobbyPropertiesUpdate(record, proof, docs[name], op)
+					if owner {
+						break
+					}
 				}
 			}
 

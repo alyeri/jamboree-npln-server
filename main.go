@@ -135,6 +135,13 @@ func (p *serverContext) HandleRPC(ctx context.Context, s stats.RPCStats) {
 		})
 
 	case *stats.End:
+		if r.method == "/nn.npln.auth.v1.Auth/IssuePrearrangedUserToken" && v.Error != nil && r.in.Load() == 0 {
+			p.event(map[string]any{
+				"event":  "prearranged_transport_error",
+				"rpc_id": r.id,
+				"kind":   prearrangedTransportErrorKind(v.Error),
+			})
+		}
 		p.captureRPC(ctx, r, "end", nil, status.Code(v.Error).String())
 		p.event(map[string]any{
 			"event":        "rpc_end",
@@ -214,6 +221,7 @@ func newServer(p *serverContext, extra ...grpc.ServerOption) *grpc.Server {
 		grpc.MaxSendMsgSize(4 << 20),
 		grpc.MaxConcurrentStreams(64),
 	}
+	opts = append(opts, grpc.ForceServerCodec(&prearrangedDiagnosticCodec{p: p}))
 	opts = append(opts, extra...)
 	s := grpc.NewServer(opts...)
 

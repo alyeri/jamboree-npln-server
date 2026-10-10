@@ -29,9 +29,10 @@ type creationRecord struct {
 
 type gameSessionServer struct {
 	mmpb.UnimplementedGameSessionServiceServer
-	p       *serverContext
-	mu      sync.Mutex
-	tickets map[string]*creationRecord
+	p           *serverContext
+	mu          sync.Mutex
+	tickets     map[string]*creationRecord
+	delegations map[string]*delegationRecord
 }
 
 func callerIdentity(ctx context.Context, key []byte) (string, error) {
@@ -90,7 +91,8 @@ func (g *gameSessionServer) CreateGameSessionCreationTicket(
 	// IsSessionEntry from succeeding even after the native join succeeds.
 	config := matchmakingConfigID(ticket.MatchmakingConfig)
 
-	if (config == "BqP4MatchmakingConfigs" || config == "BqP8MatchmakingConfigs") && ticket.GameSession.Password == "" {
+	// Password protection does not change a public room's admission state.
+	if config == "BqP4MatchmakingConfigs" || config == "BqP8MatchmakingConfigs" {
 		ticket.GameSession.IsPublic = true
 	}
 
@@ -180,7 +182,7 @@ func matchmakingConfigID(name string) string {
 	name = name[strings.LastIndex(name, "/")+1:]
 
 	switch name {
-	case "", "friend_room4", "friend_room8", "BqP4MatchmakingConfigs", "BqP8MatchmakingConfigs", "BqGameSessionSearchConfigs", "BqReEntrySessionSearchConfigs":
+	case "", "friend_room4", "friend_room8", "BqP4MatchmakingConfigs", "BqP4NoEasePaticipantConfigs", "BqP8MatchmakingConfigs", "BqP20MatchmakingConfigs", "BqGameSessionSearchConfigs", "BqReEntrySessionSearchConfigs":
 		return name
 
 	default:

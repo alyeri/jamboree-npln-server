@@ -87,6 +87,12 @@ func (s *gameSessionServer) QueryGameSessions(ctx context.Context, req *mm.Query
 
 		copy := proto.Clone(room).(*mm.GameSession)
 		copy.Password = ""
+
+		// Publish the native password marker without exposing the secret.
+		if req.GetView() == mm.GameSessionView_FULL && room.Password != "" {
+			copy.Password = "*"
+		}
+
 		response.GameSessions = append(response.GameSessions, copy)
 	}
 

@@ -96,6 +96,7 @@ type rpcCaptureArm struct {
 	ExpiresAt     time.Time `json:"expires_at"`
 	CallerDigests []string  `json:"caller_digests"`
 	MaxMessages   int       `json:"max_messages"`
+	Methods       []string  `json:"methods,omitempty"`
 }
 
 func captureMethod(method string) bool {
@@ -118,6 +119,8 @@ func captureMethod(method string) bool {
 		return true
 
 	case "/nn.npln.matchmaking.v1.GameSessionService/GetGameSession",
+		"/nn.npln.matchmaking.v1.GameSessionService/IssueUserDelegationToken",
+		"/nn.npln.matchmaking.v1.GameSessionService/IssueMatchmakingIdToken",
 		"/nn.npln.matchmaking.v1.GameSessionService/ListLatencyMeasurementServers",
 		"/nn.npln.matchmaking.v1.GameSessionService/JoinGameSession",
 		"/nn.npln.matchmaking.v1.GameSessionService/QueryGameSessions",
@@ -195,6 +198,7 @@ func (p *serverContext) captureRPC(ctx context.Context, rpc *rpcState, direction
 	}
 
 	owner, err := captureCaller(ctx, rpc.method, p.identityKey)
+
 	if err != nil {
 		return
 	}
@@ -204,6 +208,7 @@ func (p *serverContext) captureRPC(ctx context.Context, rpc *rpcState, direction
 	defer c.mu.Unlock()
 
 	armData, err := os.ReadFile(filepath.Join(c.dir, "arm.json"))
+
 	if err != nil || len(armData) > 4096 {
 		return
 	}
@@ -212,6 +217,18 @@ func (p *serverContext) captureRPC(ctx context.Context, rpc *rpcState, direction
 
 	if json.Unmarshal(armData, &arm) != nil || !arm.ExpiresAt.After(time.Now()) || arm.MaxMessages < 1 || arm.MaxMessages > 256 {
 		return
+	}
+
+	if len(arm.Methods) > 0 {
+		selected := false
+
+		for _, method := range arm.Methods {
+			selected = selected || method == rpc.method
+		}
+
+		if !selected {
+			return
+		}
 	}
 
 	digest := identityDigest(owner)
@@ -253,7 +270,10 @@ func (p *serverContext) captureRPC(ctx context.Context, rpc *rpcState, direction
 			return
 		}
 
-		data, err := (protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulated: true}).Marshal(message)
+		data, err := (protojson.MarshalOptions{
+			UseProtoNames:   true,
+			EmitUnpopulated: true,
+		}).Marshal(message)
 
 		var fields any
 
@@ -286,6 +306,7 @@ func (p *serverContext) captureRPC(ctx context.Context, rpc *rpcState, direction
 	}
 
 	file, err := os.OpenFile(filepath.Join(c.dir, "capture-"+epoch+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+
 	if err != nil {
 		p.event(map[string]any{
 			"event": "npln_private_capture_unavailable",

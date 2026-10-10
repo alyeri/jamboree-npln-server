@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pion/turn/v4"
@@ -21,13 +22,101 @@ const jamboreeTURNRealm = "nextendo-jamboree-diagnostic"
 
 type observedTURNConn struct {
 	net.PacketConn
-	p      *serverContext
-	window time.Time
-	count  int
+	p              *serverContext
+	window         time.Time
+	count          int
+	responseMu     sync.Mutex
+	responseWindow time.Time
+	responseCount  int
+}
+
+func turnResponseStatus(packet []byte) (int, int, bool) {
+	if len(packet) < 20 || binary.BigEndian.Uint32(packet[4:8]) != stunCookie || int(binary.BigEndian.Uint16(packet[2:4])) != len(packet)-20 {
+		return 0, 0, false
+	}
+
+	kind := int(binary.BigEndian.Uint16(packet[:2]))
+	code := 0
+	for offset := 20; offset < len(packet); {
+		if offset+4 > len(packet) {
+			return 0, 0, false
+		}
+
+		attribute := binary.BigEndian.Uint16(packet[offset : offset+2])
+		length := int(binary.BigEndian.Uint16(packet[offset+2 : offset+4]))
+		start := offset + 4
+
+		if start+length > len(packet) {
+			return 0, 0, false
+		}
+
+		if attribute == 9 && length >= 4 {
+			code = int(packet[start+2]&7)*100 + int(packet[start+3])
+		}
+
+		offset = start + (length+3)&^3
+
+		if offset > len(packet) {
+			return 0, 0, false
+		}
+	}
+
+	return kind, code, true
+}
+
+func (c *observedTURNConn) WriteTo(packet []byte, address net.Addr) (int, error) {
+	wirePacket := unpaddedTURNChannelData(packet)
+	n, err := c.PacketConn.WriteTo(wirePacket, address)
+
+	if kind, code, ok := turnResponseStatus(packet); ok {
+		c.responseMu.Lock()
+
+		if time.Since(c.responseWindow) >= time.Second {
+			c.responseWindow, c.responseCount = time.Now(), 0
+		}
+
+		c.responseCount++
+
+		if c.responseCount <= 32 {
+			c.p.event(map[string]any{
+				"event":        "turn_response_sent",
+				"message_type": kind,
+				"status":       code,
+				"bytes":        n,
+				"write_failed": err != nil,
+			})
+		}
+
+		c.responseMu.Unlock()
+	}
+
+	if err == nil && n == len(wirePacket) {
+		return len(packet), nil
+	}
+
+	return n, err
+}
+
+// UDP ChannelData padding is optional. Jamboree's connection test expects
+// exactly the four-byte header plus the declared payload, without padding.
+func unpaddedTURNChannelData(packet []byte) []byte {
+	if len(packet) < 4 {
+		return packet
+	}
+
+	channel := binary.BigEndian.Uint16(packet[:2])
+	length := 4 + int(binary.BigEndian.Uint16(packet[2:4]))
+
+	if channel < 0x4000 || channel > 0x7fff || length > len(packet) || (length+3)&^3 != len(packet) {
+		return packet
+	}
+
+	return packet[:length]
 }
 
 func (c *observedTURNConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	n, addr, err := c.PacketConn.ReadFrom(b)
+
 	if err == nil {
 		if time.Since(c.window) >= time.Second {
 			c.window, c.count = time.Now(), 0
@@ -80,6 +169,7 @@ func validTURNUsername(user string) bool {
 	}
 
 	_, e := hex.DecodeString(p[1])
+
 	if e != nil {
 		return false
 	}
@@ -103,6 +193,7 @@ func (r *restrictedRelayPorts) AllocatePacketConn(network string, port int) (net
 
 func startJamboreeTURN(p *serverContext, listen, relayIP string, allowLocal bool) (*turn.Server, net.Addr, error) {
 	a, e := net.ResolveUDPAddr("udp4", listen)
+
 	if e != nil {
 		return nil, nil, e
 	}
@@ -114,6 +205,7 @@ func startJamboreeTURN(p *serverContext, listen, relayIP string, allowLocal bool
 	}
 
 	conn, e := net.ListenUDP("udp4", a)
+
 	if e != nil {
 		return nil, nil, e
 	}
@@ -129,7 +221,10 @@ func startJamboreeTURN(p *serverContext, listen, relayIP string, allowLocal bool
 		},
 		PacketConnConfigs: []turn.PacketConnConfig{
 			{
-				PacketConn: &observedTURNConn{PacketConn: conn, p: p},
+				PacketConn: &observedTURNConn{
+					PacketConn: conn,
+					p:          p,
+				},
 				RelayAddressGenerator: &restrictedRelayPorts{
 					&turn.RelayAddressGeneratorPortRange{
 						RelayAddress: ip,
@@ -184,14 +279,17 @@ func startJamboreeTURN(p *serverContext, listen, relayIP string, allowLocal bool
 
 func serveJamboreeTURN(ctx context.Context, p *serverContext, listen string) error {
 	ip, _, e := net.SplitHostPort(listen)
+
 	if e != nil {
 		return e
 	}
 
 	s, _, e := startJamboreeTURN(p, listen, ip, false)
+
 	if e != nil {
 		return e
 	}
+
 	defer s.Close()
 
 	<-ctx.Done()

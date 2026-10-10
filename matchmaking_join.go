@@ -16,6 +16,7 @@ import (
 
 func (s *gameSessionServer) JoinGameSession(ctx context.Context, req *mm.JoinGameSessionRequest) (*mm.JoinGameSessionResponse, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
+
 	if e != nil {
 		return nil, e
 	}
@@ -41,6 +42,11 @@ func (s *gameSessionServer) JoinGameSession(ctx context.Context, req *mm.JoinGam
 		definition.User != "users/current" &&
 		!strings.HasSuffix(definition.User, "/users/current") &&
 		canonicalUserSession(definition.User) != canonicalUserSession(owner) {
+		s.p.event(map[string]any{
+			"event":  "room_join_rejected",
+			"reason": "caller_mismatch",
+		})
+
 		return nil, status.Error(codes.PermissionDenied, "join user must match caller")
 	}
 
@@ -56,6 +62,13 @@ func (s *gameSessionServer) JoinGameSession(ctx context.Context, req *mm.JoinGam
 		}
 
 		if !hmac.Equal([]byte(room.Password), []byte(req.Password)) {
+			s.p.event(map[string]any{
+				"event":                    "room_join_rejected",
+				"reason":                   "password_mismatch",
+				"room_password_present":    room.Password != "",
+				"request_password_present": req.Password != "",
+			})
+
 			return nil, status.Error(codes.PermissionDenied, "incorrect room password")
 		}
 
@@ -86,6 +99,7 @@ func (s *gameSessionServer) JoinGameSession(ctx context.Context, req *mm.JoinGam
 		}
 
 		proof, e := (&authServer{key: s.p.identityKey}).signSessionToken(owner+"|"+user.Name, "matchmaking", 15*time.Minute)
+
 		if e != nil {
 			return nil, e
 		}

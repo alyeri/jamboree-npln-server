@@ -73,7 +73,18 @@ func (s *gameSessionServer) CreateGameSessionShortAlias(ctx context.Context, req
 	}
 
 	if rec.owner != owner {
-		return nil, status.Error(codes.NotFound, "room code not published yet")
+		assigned := false
+
+		for _, participant := range rec.ticket.GetGameSession().GetUserSessions() {
+			if canonicalUserSession(participant.GetUser()) == canonicalUserSession(owner) {
+				assigned = true
+				break
+			}
+		}
+
+		if !assigned {
+			return nil, status.Error(codes.NotFound, "room code not published yet")
+		}
 	}
 
 	for attempt := 0; attempt < 64; attempt++ {
@@ -172,6 +183,11 @@ func (s *gameSessionServer) GetGameSession(ctx context.Context, req *mm.GetGameS
 
 			if r.owner != owner {
 				room.Password = ""
+
+				// The native SDK recognizes "*" as IsPasswordNeeded.
+				if req.GetView() == mm.GameSessionView_FULL && r.ticket.GameSession.Password != "" {
+					room.Password = "*"
+				}
 			}
 
 			return room, nil
