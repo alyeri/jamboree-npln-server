@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -12,6 +14,17 @@ import (
 
 	mm "github.com/alyeri/jamboree-npln-server/proto/matchmaking/v1"
 )
+
+func publicServerIP() (string, error) {
+	host := strings.TrimSpace(os.Getenv("NPLN_PUBLIC_IP"))
+	ip := net.ParseIP(host)
+
+	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
+		return "", status.Error(codes.FailedPrecondition, "NPLN_PUBLIC_IP must contain a server IP address")
+	}
+
+	return ip.String(), nil
+}
 
 func (s *gameSessionServer) AllocateIceServerSet(ctx context.Context, req *mm.AllocateIceServerSetRequest) (*mm.IceServerSet, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
@@ -30,6 +43,12 @@ func (s *gameSessionServer) AllocateIceServerSet(ctx context.Context, req *mm.Al
 
 	if user != "" && user != "users/current" && user != "tenants/current/users/current" && user != owner {
 		return nil, status.Error(codes.PermissionDenied, "ICE user must match caller")
+	}
+
+	host, e := publicServerIP()
+
+	if e != nil {
+		return nil, e
 	}
 
 	username, password, e := newTURNCredentials(s.p.identityKey)
@@ -53,13 +72,13 @@ func (s *gameSessionServer) AllocateIceServerSet(ctx context.Context, req *mm.Al
 	return &mm.IceServerSet{
 		Name: "tenants/t-adf89f68-lp1/iceServerSets/default",
 		StunServer: &mm.StunServer{
-			Host:     "51.178.29.194",
+			Host:     host,
 			Port:     17478,
 			Protocol: mm.StunServer_UDP,
 		},
 		TurnServers: []*mm.TurnServer{
 			{
-				Host:     "51.178.29.194",
+				Host:     host,
 				Port:     17479,
 				Protocol: mm.TurnServer_UDP,
 				Username: username,

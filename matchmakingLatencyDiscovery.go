@@ -26,6 +26,12 @@ func (g *gameSessionServer) ListLatencyMeasurementServers(ctx context.Context, r
 		return nil, status.Error(codes.InvalidArgument, "invalid latency server page")
 	}
 
+	host, err := publicServerIP()
+
+	if err != nil {
+		return nil, err
+	}
+
 	g.p.event(map[string]any{
 		"event":    "latency_servers_listed",
 		"count":    1,
@@ -37,7 +43,7 @@ func (g *gameSessionServer) ListLatencyMeasurementServers(ctx context.Context, r
 		LatencyMeasurementServers: []*mm.LatencyMeasurementServer{
 			{
 				Name:     "tenants/t-adf89f68-lp1/latencyMeasurementServers/local",
-				Host:     "51.178.29.194",
+				Host:     host,
 				Port:     17480,
 				Protocol: mm.LatencyMeasurementServer_HTTP,
 			},

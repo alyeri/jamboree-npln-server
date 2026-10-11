@@ -16,6 +16,8 @@ import (
 )
 
 func TestLatencyDiscoveryAuthenticationAndTenant(t *testing.T) {
+	t.Setenv("NPLN_PUBLIC_IP", "192.0.2.10")
+
 	key := bytes.Repeat([]byte{7}, 32)
 	g := &gameSessionServer{
 		p: &serverContext{
@@ -47,7 +49,7 @@ func TestLatencyDiscoveryAuthenticationAndTenant(t *testing.T) {
 
 		s := out.LatencyMeasurementServers[0]
 
-		if s.Host != "51.178.29.194" || s.Port != 17480 || s.Protocol != mm.LatencyMeasurementServer_HTTP || s.Name != "tenants/t-adf89f68-lp1/latencyMeasurementServers/local" {
+		if s.Host != "192.0.2.10" || s.Port != 17480 || s.Protocol != mm.LatencyMeasurementServer_HTTP || s.Name != "tenants/t-adf89f68-lp1/latencyMeasurementServers/local" {
 			t.Fatal("invalid endpoint")
 		}
 	}
