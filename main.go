@@ -41,6 +41,7 @@ type rpcState struct {
 	in, out atomic.Int64
 }
 type serverContext struct {
+	dashboard         *dashboardMonitor
 	prearrangedTokens prearrangedTokenCache
 	capture           *rpcCapture
 	identityKey       []byte
@@ -88,6 +89,12 @@ func safeMethod(s string) string {
 	return s
 }
 func (p *serverContext) TagRPC(ctx context.Context, i *stats.RPCTagInfo) context.Context {
+	if p.dashboard != nil {
+		if user, err := callerIdentity(ctx, p.identityKey); err == nil {
+			p.dashboard.observe(ctx, user)
+		}
+	}
+
 	r := &rpcState{
 		id:      p.next.Add(1),
 		method:  safeMethod(i.FullMethodName),
@@ -112,6 +119,10 @@ func (p *serverContext) HandleRPC(ctx context.Context, s stats.RPCStats) {
 
 	switch v := s.(type) {
 	case *stats.InPayload:
+		if p.dashboard != nil {
+			p.dashboard.touch(ctx)
+		}
+
 		p.captureRPC(ctx, r, "request", v.Payload, "")
 		r.in.Add(1)
 		p.event(map[string]any{
@@ -153,9 +164,13 @@ func (p *serverContext) HandleRPC(ctx context.Context, s stats.RPCStats) {
 	}
 }
 func (p *serverContext) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context {
+	if p.dashboard != nil {
+		return p.dashboard.connection(ctx)
+	}
+
 	return ctx
 }
-func (p *serverContext) HandleConn(_ context.Context, s stats.ConnStats) {
+func (p *serverContext) HandleConn(ctx context.Context, s stats.ConnStats) {
 	switch s.(type) {
 	case *stats.ConnBegin:
 		p.event(map[string]any{
@@ -163,6 +178,10 @@ func (p *serverContext) HandleConn(_ context.Context, s stats.ConnStats) {
 		})
 
 	case *stats.ConnEnd:
+		if p.dashboard != nil {
+			p.dashboard.disconnect(ctx)
+		}
+
 		p.event(map[string]any{
 			"event": "connection_close",
 		})
@@ -276,11 +295,18 @@ func newServer(p *serverContext, extra ...grpc.ServerOption) *grpc.Server {
 		tickets: map[string]*searchRecord{},
 	})
 
-	gspb.RegisterGamesyncServer(s, &gamesyncServer{
+	gamesync := &gamesyncServer{
 		p:         p,
 		rooms:     rooms,
 		documents: map[string]map[string]*gspb.Document{},
-	})
+	}
+
+	gspb.RegisterGamesyncServer(s, gamesync)
+
+	if p.dashboard != nil {
+		p.dashboard.rooms = rooms
+		p.dashboard.gamesync = gamesync
+	}
 
 	return s
 }
@@ -374,6 +400,13 @@ func main() {
 		writer:      os.Stdout,
 		identityKey: identityKey,
 	}
+	dashboard, err := dashboardFromEnvironment(p)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	p.dashboard = dashboard
 	cfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		Certificates: []tls.Certificate{
@@ -386,6 +419,20 @@ func main() {
 
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	if dashboard != nil {
+		dashListener, err := net.Listen("tcp", os.Getenv("DASH_LISTEN"))
+
+		if err != nil {
+			log.Fatal("cannot start dashboard listener: ", err)
+		}
+
+		go func() {
+			if err := dashboard.httpServer().Serve(dashListener); err != nil {
+				log.Fatal("dashboard listener stopped: ", err)
+			}
+		}()
 	}
 
 	p.event(map[string]any{

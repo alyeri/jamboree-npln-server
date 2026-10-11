@@ -114,6 +114,10 @@ func (s *gamesyncServer) KeepUserSession(stream grpc.BidiStreamingServer[gspb.Ke
 		return err
 	}
 
+	if s.p.dashboard != nil {
+		s.p.dashboard.observe(stream.Context(), strings.Split(proof, "|")[0])
+	}
+
 	s.p.event(map[string]any{
 		"event":            "gamesync_keep_open",
 		"recipient_digest": identityDigest(proof),
