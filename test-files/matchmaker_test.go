@@ -25,7 +25,6 @@ type searchTestStream struct {
 func (s *searchTestStream) Context() context.Context {
 	return s.ctx
 }
-
 func (s *searchTestStream) Send(t *mm.MatchmakingTicket) error {
 	s.sent <- proto.Clone(t).(*mm.MatchmakingTicket)
 
@@ -36,9 +35,11 @@ func TestSurvivalMatchmakerPairAndGuestFirstGamesync(t *testing.T) {
 	t.Run("Survival", func(t *testing.T) {
 		testMatchmakerPairAndGuestFirstGamesync(t, 34308)
 	})
+
 	t.Run("DailyChallenges", func(t *testing.T) {
 		testMatchmakerPairAndGuestFirstGamesync(t, 1344260)
 	})
+
 	t.Run("Showdown", func(t *testing.T) {
 		testMatchmakerPairAndGuestFirstGamesync(t, 33284)
 	})
@@ -59,7 +60,9 @@ func testMatchmakerPairAndGuestFirstGamesync(t *testing.T, mode int64) {
 		tickets: map[string]*searchRecord{},
 	}
 	ctxFor := func(user string) context.Context {
-		token, _ := (&authServer{key: key}).signSessionToken("tenants/current/users/"+user, "access", time.Minute)
+		token, _ := (&authServer{
+			key: key,
+		}).signSessionToken("tenants/current/users/"+user, "access", time.Minute)
 
 		return metadata.NewIncomingContext(context.Background(), metadata.Pairs("npln-tenant-id", "t-adf89f68-lp1", "authorization", token))
 	}
@@ -71,10 +74,12 @@ func testMatchmakerPairAndGuestFirstGamesync(t *testing.T, mode int64) {
 			UserDefinitions: []*mm.UserDefinition{
 				{
 					User: "users/current",
-					Attributes: &common.MapValue{Fields: map[string]*common.Value{
-						"gameMode": intValue(34308),
-						"udemae":   intValue(0),
-					}},
+					Attributes: &common.MapValue{
+						Fields: map[string]*common.Value{
+							"gameMode": intValue(34308),
+							"udemae":   intValue(0),
+						},
+					},
 				},
 			},
 		},
@@ -96,7 +101,9 @@ func testMatchmakerPairAndGuestFirstGamesync(t *testing.T, mode int64) {
 		t.Fatal("create fabricated success or mutated request")
 	}
 
-	if _, err := m.CancelMatchmakingTicket(b, &mm.CancelMatchmakingTicketRequest{Name: one.Name}); status.Code(err) != codes.PermissionDenied {
+	if _, err := m.CancelMatchmakingTicket(b, &mm.CancelMatchmakingTicketRequest{
+		Name: one.Name,
+	}); status.Code(err) != codes.PermissionDenied {
 		t.Fatal("cross-user cancel", err)
 	}
 
@@ -108,8 +115,10 @@ func testMatchmakerPairAndGuestFirstGamesync(t *testing.T, mode int64) {
 
 	ca, cancelA := context.WithCancel(a)
 	defer cancelA()
+
 	cb, cancelB := context.WithCancel(b)
 	defer cancelB()
+
 	sa := &searchTestStream{
 		ctx:  ca,
 		sent: make(chan *mm.MatchmakingTicket, 4),
@@ -119,44 +128,62 @@ func testMatchmakerPairAndGuestFirstGamesync(t *testing.T, mode int64) {
 		sent: make(chan *mm.MatchmakingTicket, 4),
 	}
 	done := make(chan error, 2)
+
 	go func() {
-		done <- m.TrackMatchmakingTicket(&mm.TrackMatchmakingTicketRequest{Name: one.Name}, sa)
+		done <- m.TrackMatchmakingTicket(&mm.TrackMatchmakingTicketRequest{
+			Name: one.Name,
+		}, sa)
 	}()
+
 	select {
 	case out := <-sa.sent:
 		if out.State != mm.MatchmakingTicket_SEARCHING {
 			t.Fatal("single user assigned")
 		}
+
 	case <-time.After(time.Second):
 		t.Fatal("no searching state")
 	}
+
 	go func() {
-		done <- m.TrackMatchmakingTicket(&mm.TrackMatchmakingTicketRequest{Name: two.Name}, sb)
+		done <- m.TrackMatchmakingTicket(&mm.TrackMatchmakingTicketRequest{
+			Name: two.Name,
+		}, sb)
 	}()
+
 	select {
 	case out := <-sb.sent:
 		if out.State != mm.MatchmakingTicket_SEARCHING {
 			t.Fatal("partial group assigned before deadline")
 		}
+
 	case <-time.After(time.Second):
 		t.Fatal("second participant did not begin tracking")
 	}
+
 	m.mu.Lock()
+
 	m.tickets[one.Name].created = time.Now().Add(-matchmakingSearchWindow)
+
 	m.mu.Unlock()
+
 	for i := 0; i < 2; i++ {
 		select {
 		case err := <-done:
 			if err != nil {
 				t.Fatal(err)
 			}
+
 		case <-time.After(2 * time.Second):
 			t.Fatal("pair did not complete")
 		}
 	}
+
 	m.mu.Lock()
+
 	outA := proto.Clone(m.tickets[one.Name].ticket).(*mm.MatchmakingTicket)
 	outB := proto.Clone(m.tickets[two.Name].ticket).(*mm.MatchmakingTicket)
+
 	m.mu.Unlock()
 
 	if outA.State != mm.MatchmakingTicket_SUCCEEDED || outA.GameSession.Name != outB.GameSession.Name || outA.GameSession.CurrentParticipantCount != 2 || len(g.tickets) != 1 {
@@ -167,7 +194,10 @@ func testMatchmakerPairAndGuestFirstGamesync(t *testing.T, mode int64) {
 		t.Fatal("participant identity shared")
 	}
 
-	for _, out := range []*mm.MatchmakingTicket{outA, outB} {
+	for _, out := range []*mm.MatchmakingTicket{
+		outA,
+		outB,
+	} {
 		v := out.MatchedUserSessions[0]
 		proof, err := verifySessionProof(v.MatchmakingIdToken, key, "matchmaking")
 
@@ -198,7 +228,9 @@ func testMatchmakerPairAndGuestFirstGamesync(t *testing.T, mode int64) {
 }
 
 func TestMatchmakerSeparatesDailyAndSurvival(t *testing.T) {
-	p := &serverContext{writer: &bytes.Buffer{}}
+	p := &serverContext{
+		writer: &bytes.Buffer{},
+	}
 	g := &gameSessionServer{
 		p:       p,
 		tickets: map[string]*creationRecord{},
@@ -218,7 +250,13 @@ func TestMatchmakerSeparatesDailyAndSurvival(t *testing.T) {
 				State:             mm.MatchmakingTicket_SEARCHING,
 				MatchmakingConfig: "tenants/t-adf89f68-lp1/matchmakingConfigs/BqP4MatchmakingConfigs",
 				UserDefinitions: []*mm.UserDefinition{
-					{Attributes: &common.MapValue{Fields: map[string]*common.Value{"gameMode": intValue(mode)}}},
+					{
+						Attributes: &common.MapValue{
+							Fields: map[string]*common.Value{
+								"gameMode": intValue(mode),
+							},
+						},
+					},
 				},
 			},
 		}
@@ -247,7 +285,9 @@ func TestSurvivalMatchmakerTimeoutAndDisconnectedSearch(t *testing.T) {
 		rooms:   g,
 		tickets: map[string]*searchRecord{},
 	}
-	token, _ := (&authServer{key: key}).signSessionToken("tenants/current/users/a", "access", time.Minute)
+	token, _ := (&authServer{
+		key: key,
+	}).signSessionToken("tenants/current/users/a", "access", time.Minute)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("npln-tenant-id", "t-adf89f68-lp1", "authorization", token))
 	owner, _ := callerIdentity(ctx, key)
 	owner = canonicalUserSession(owner)
@@ -265,7 +305,9 @@ func TestSurvivalMatchmakerTimeoutAndDisconnectedSearch(t *testing.T) {
 		sent: make(chan *mm.MatchmakingTicket, 2),
 	}
 
-	if err := m.TrackMatchmakingTicket(&mm.TrackMatchmakingTicketRequest{Name: name}, s); err != nil {
+	if err := m.TrackMatchmakingTicket(&mm.TrackMatchmakingTicketRequest{
+		Name: name,
+	}, s); err != nil {
 		t.Fatal(err)
 	}
 
@@ -276,10 +318,14 @@ func TestSurvivalMatchmakerTimeoutAndDisconnectedSearch(t *testing.T) {
 	m.tickets[name].created = time.Now()
 	m.tickets[name].ticket.State = mm.MatchmakingTicket_SEARCHING
 	c, cancel := context.WithCancel(ctx)
+
 	cancel()
+
 	s.ctx = c
 
-	if err := m.TrackMatchmakingTicket(&mm.TrackMatchmakingTicketRequest{Name: name}, s); err == nil {
+	if err := m.TrackMatchmakingTicket(&mm.TrackMatchmakingTicketRequest{
+		Name: name,
+	}, s); err == nil {
 		t.Fatal("cancel ignored")
 	}
 

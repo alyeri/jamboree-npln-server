@@ -41,6 +41,7 @@ func newLeaderboardServer(p *serverContext, path string) (*leaderboardServer, er
 
 	if path != "" {
 		data, err := os.ReadFile(path + ".scores")
+
 		if err == nil {
 			var disk map[string][]byte
 
@@ -66,6 +67,7 @@ func newLeaderboardServer(p *serverContext, path string) (*leaderboardServer, er
 				}
 
 				season, err := rankingSeason(strings.Join(parts[:6], "/"))
+
 				if err != nil {
 					return nil, err
 				}
@@ -152,9 +154,9 @@ func defaultHolder(owner string) string {
 
 	return "tenants/t-adf89f68-lp1/holders/h-" + hex.EncodeToString(sum[:16])
 }
-
 func holderName(name, owner string) (string, bool, error) {
 	n, e := leaderboardResource(name, "holders")
+
 	if e != nil {
 		return "", false, e
 	}
@@ -165,7 +167,6 @@ func holderName(name, owner string) (string, bool, error) {
 
 	return n, false, nil
 }
-
 func (s *leaderboardServer) persist(next map[string]*lb.Holder) error {
 	if s.path == "" {
 		s.holders = next
@@ -177,6 +178,7 @@ func (s *leaderboardServer) persist(next map[string]*lb.Holder) error {
 
 	for name, h := range next {
 		b, e := proto.Marshal(h)
+
 		if e != nil {
 			return status.Error(codes.Internal, "holder serialization failed")
 		}
@@ -185,11 +187,13 @@ func (s *leaderboardServer) persist(next map[string]*lb.Holder) error {
 	}
 
 	raw, e := json.Marshal(disk)
+
 	if e != nil {
 		return status.Error(codes.Internal, "holder serialization failed")
 	}
 
 	f, e := os.CreateTemp(filepath.Dir(s.path), ".holders-*")
+
 	if e != nil {
 		return status.Error(codes.Internal, "holder store unavailable")
 	}
@@ -198,6 +202,7 @@ func (s *leaderboardServer) persist(next map[string]*lb.Holder) error {
 	defer os.Remove(tmp)
 
 	e = f.Chmod(0600)
+
 	if e == nil {
 		_, e = f.Write(raw)
 	}
@@ -224,7 +229,6 @@ func (s *leaderboardServer) persist(next map[string]*lb.Holder) error {
 
 	return nil
 }
-
 func (s *leaderboardServer) commit(h *lb.Holder) error {
 	next := make(map[string]*lb.Holder, len(s.holders)+1)
 
@@ -236,7 +240,6 @@ func (s *leaderboardServer) commit(h *lb.Holder) error {
 
 	return s.persist(next)
 }
-
 func checkedHolderOwner(h *lb.Holder, owner string) error {
 	if h.Owner != "" && canonicalUserSession(h.Owner) != owner {
 		return status.Error(codes.PermissionDenied, "holder belongs to another user")
@@ -248,9 +251,9 @@ func checkedHolderOwner(h *lb.Holder, owner string) error {
 
 	return nil
 }
-
 func (s *leaderboardServer) CreateHolder(ctx context.Context, r *lb.CreateHolderRequest) (*lb.Holder, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
+
 	if e != nil {
 		return nil, e
 	}
@@ -272,6 +275,7 @@ func (s *leaderboardServer) CreateHolder(ctx context.Context, r *lb.CreateHolder
 	}
 
 	name, _, e := holderName(h.Name, owner)
+
 	if e != nil {
 		return nil, e
 	}
@@ -294,9 +298,9 @@ func (s *leaderboardServer) CreateHolder(ctx context.Context, r *lb.CreateHolder
 
 	return proto.Clone(h).(*lb.Holder), nil
 }
-
 func (s *leaderboardServer) UpdateHolder(ctx context.Context, r *lb.UpdateHolderRequest) (*lb.Holder, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
+
 	if e != nil {
 		return nil, e
 	}
@@ -314,6 +318,7 @@ func (s *leaderboardServer) UpdateHolder(ctx context.Context, r *lb.UpdateHolder
 	}
 
 	name, isDefault, e := holderName(in.Name, owner)
+
 	if e != nil {
 		return nil, e
 	}
@@ -393,14 +398,15 @@ func (s *leaderboardServer) UpdateHolder(ctx context.Context, r *lb.UpdateHolder
 
 	return proto.Clone(h).(*lb.Holder), nil
 }
-
 func (s *leaderboardServer) GetHolder(ctx context.Context, r *lb.GetHolderRequest) (*lb.Holder, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
+
 	if e != nil {
 		return nil, e
 	}
 
 	name, _, e := holderName(r.Name, canonicalUserSession(owner))
+
 	if e != nil {
 		return nil, e
 	}
@@ -416,7 +422,6 @@ func (s *leaderboardServer) GetHolder(ctx context.Context, r *lb.GetHolderReques
 
 	return proto.Clone(h).(*lb.Holder), nil
 }
-
 func (s *leaderboardServer) SearchHolders(ctx context.Context, r *lb.SearchHoldersRequest) (*lb.SearchHoldersResponse, error) {
 	if _, e := callerIdentity(ctx, s.p.identityKey); e != nil {
 		return nil, e
@@ -450,11 +455,13 @@ func (s *leaderboardServer) SearchHolders(ctx context.Context, r *lb.SearchHolde
 	}
 
 	sort.Strings(names)
+
 	out := &lb.SearchHoldersResponse{}
 
 	for i, n := range names {
 		if i == size {
 			out.NextPageToken = names[i-1]
+
 			break
 		}
 
@@ -463,15 +470,16 @@ func (s *leaderboardServer) SearchHolders(ctx context.Context, r *lb.SearchHolde
 
 	return out, nil
 }
-
 func (s *leaderboardServer) DeleteHolder(ctx context.Context, r *lb.DeleteHolderRequest) (*emptypb.Empty, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
+
 	if e != nil {
 		return nil, e
 	}
 
 	owner = canonicalUserSession(owner)
 	name, _, e := holderName(r.Name, owner)
+
 	if e != nil {
 		return nil, e
 	}

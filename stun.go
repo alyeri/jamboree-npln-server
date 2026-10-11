@@ -12,14 +12,7 @@ const stunCookie uint32 = 0x2112a442
 
 // Basic unauthenticated UDP Binding, RFC 8489. No TURN allocation is advertised.
 func stunBindingResponse(req []byte, peer *net.UDPAddr) []byte {
-	if len(req) < 20 ||
-		len(req) > 512 ||
-		binary.BigEndian.Uint16(req) != 1 ||
-		binary.BigEndian.Uint32(req[4:]) != stunCookie ||
-		int(binary.BigEndian.Uint16(req[2:])) != len(req)-20 ||
-		len(req)%4 != 0 ||
-		peer.Port < 1 ||
-		peer.Port > 65535 {
+	if len(req) < 20 || len(req) > 512 || binary.BigEndian.Uint16(req) != 1 || binary.BigEndian.Uint32(req[4:]) != stunCookie || int(binary.BigEndian.Uint16(req[2:])) != len(req)-20 || len(req)%4 != 0 || peer.Port < 1 || peer.Port > 65535 {
 		return nil
 	}
 
@@ -50,8 +43,11 @@ func stunBindingResponse(req []byte, peer *net.UDPAddr) []byte {
 	}
 
 	out := make([]byte, 20)
+
 	copy(out[4:], req[4:20])
+
 	binary.BigEndian.PutUint16(out, 0x0101)
+
 	attribute := func(kind uint16, value []byte) {
 		out = binary.BigEndian.AppendUint16(out, kind)
 		out = binary.BigEndian.AppendUint16(out, uint16(len(value)))
@@ -64,7 +60,14 @@ func stunBindingResponse(req []byte, peer *net.UDPAddr) []byte {
 
 	if len(unknown) > 0 {
 		binary.BigEndian.PutUint16(out, 0x0111)
-		attribute(0x0009, append([]byte{0, 0, 4, 20}, []byte("Unknown Attribute")...))
+
+		attribute(0x0009, append([]byte{
+			0,
+			0,
+			4,
+			20,
+		}, []byte("Unknown Attribute")...))
+
 		attribute(0x000a, unknown)
 	} else {
 		ip := peer.IP.To4()
@@ -79,7 +82,10 @@ func stunBindingResponse(req []byte, peer *net.UDPAddr) []byte {
 			return nil
 		}
 
-		value := []byte{0, family}
+		value := []byte{
+			0,
+			family,
+		}
 		value = binary.BigEndian.AppendUint16(value, uint16(peer.Port)^uint16(stunCookie>>16))
 		mask := req[4:20]
 
@@ -91,31 +97,39 @@ func stunBindingResponse(req []byte, peer *net.UDPAddr) []byte {
 	}
 
 	binary.BigEndian.PutUint16(out[2:], uint16(len(out)-20+8))
+
 	sum := crc32.ChecksumIEEE(out) ^ 0x5354554e
+
 	attribute(0x8028, binary.BigEndian.AppendUint32(nil, sum))
 
 	return out
 }
-
 func serveSTUN(address string, p *serverContext) error {
 	a, e := net.ResolveUDPAddr("udp4", address)
+
 	if e != nil {
 		return e
 	}
 
 	conn, e := net.ListenUDP("udp4", a)
+
 	if e != nil {
 		return e
 	}
 	defer conn.Close()
 
-	p.event(map[string]any{"event": "stun_start", "listen": address})
+	p.event(map[string]any{
+		"event":  "stun_start",
+		"listen": address,
+	})
+
 	buf := make([]byte, 513)
 	window := time.Now()
 	count := 0
 
 	for {
 		n, peer, e := conn.ReadFromUDP(buf)
+
 		if e != nil {
 			return e
 		}

@@ -21,13 +21,13 @@ import (
 	authpb "github.com/alyeri/jamboree-npln-server/proto/auth/v1"
 )
 
-// Identities and tokens are scoped to this server, not verified Nextendo accounts.
+// These are isolated diagnostic identities, not verified Nextendo accounts.
+// Tokens belong only to this isolated diagnostic server, not Nextendo accounts.
 type suppressIdentityLog struct{}
-
 type authServer struct {
 	authpb.UnimplementedAuthServer
-	state *serverContext
-	key   []byte
+	serverContext *serverContext
+	key           []byte
 }
 
 func (s *authServer) CreateUser(ctx context.Context, req *authpb.CreateUserRequest) (*authpb.User, error) {
@@ -38,11 +38,7 @@ func (s *authServer) CreateUser(ctx context.Context, req *authpb.CreateUserReque
 	parent := req.GetParent()
 	valid := false
 
-	for _, prefix := range []string{
-		"tenants/current",
-		"tenants/t-adf89f68-lp1",
-		"tenants/t-adf89f68",
-	} {
+	for _, prefix := range []string{"tenants/current", "tenants/t-adf89f68-lp1", "tenants/t-adf89f68"} {
 		if parent == prefix {
 			valid = true
 		}
@@ -68,6 +64,7 @@ func (s *authServer) CreateUser(ctx context.Context, req *authpb.CreateUserReque
 		}
 
 		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+
 		if err != nil {
 			return nil, status.Error(codes.Unauthenticated, "malformed external token")
 		}
@@ -94,9 +91,10 @@ func (s *authServer) CreateUser(ctx context.Context, req *authpb.CreateUserReque
 		return nil, status.Error(codes.Unauthenticated, "external identity token required")
 	}
 
-	// Keep the existing hash namespace so persisted user identities stay stable.
 	mac := hmac.New(sha256.New, s.key)
+
 	mac.Write([]byte("jamboree-diagnostic\x00" + identity))
+
 	digest := mac.Sum(nil)
 	id := hex.EncodeToString(digest[:16])
 	shortID := int64(binary.BigEndian.Uint64(digest[16:24]) & 0x7fffffffffffffff)
@@ -114,7 +112,7 @@ func (s *authServer) CreateUser(ctx context.Context, req *authpb.CreateUserReque
 	}
 
 	if ctx.Value(suppressIdentityLog{}) == nil {
-		s.state.event(map[string]any{
+		s.serverContext.event(map[string]any{
 			"event":                 "create_user",
 			"rpc_id":                rpcID,
 			"token_kind":            kind,
@@ -127,7 +125,7 @@ func (s *authServer) CreateUser(ctx context.Context, req *authpb.CreateUserReque
 
 	// The Friends protocol carries a 64-bit account identifier, not the
 	// unrelated 128-bit NPLN user identifier. Keep this association internal.
-	if s.state != nil {
+	if s.serverContext != nil {
 		accountID := "000000000000cafe"
 
 		if strings.HasPrefix(identity, "nextendo-diagnostic:") {
@@ -137,23 +135,23 @@ func (s *authServer) CreateUser(ctx context.Context, req *authpb.CreateUserReque
 			accountID = hex.EncodeToString(digest[16:24])
 		}
 
-		s.state.mu.Lock()
+		s.serverContext.mu.Lock()
 
-		if s.state.accountIDs == nil {
-			s.state.accountIDs = map[string]string{}
+		if s.serverContext.accountIDs == nil {
+			s.serverContext.accountIDs = map[string]string{}
 		}
 
-		if len(s.state.accountIDs) < 256 || s.state.accountIDs[canonicalUserSession(parent+"/users/"+id)] != "" {
-			s.state.accountIDs[canonicalUserSession(parent+"/users/"+id)] = accountID
-			s.state.accountIDs[canonicalUserSession(parent+"/users/u-"+id)] = accountID
-			s.state.accountIDs[canonicalUserSession(parent+"/users/"+strconv.FormatInt(shortID, 10))] = accountID
+		if len(s.serverContext.accountIDs) < 256 || s.serverContext.accountIDs[canonicalUserSession(parent+"/users/"+id)] != "" {
+			s.serverContext.accountIDs[canonicalUserSession(parent+"/users/"+id)] = accountID
+			s.serverContext.accountIDs[canonicalUserSession(parent+"/users/u-"+id)] = accountID
+			s.serverContext.accountIDs[canonicalUserSession(parent+"/users/"+strconv.FormatInt(shortID, 10))] = accountID
 		}
 
-		s.state.mu.Unlock()
+		s.serverContext.mu.Unlock()
 	}
 
-	if s.state != nil {
-		s.state.prearrangedTokens.remember(ext.GetNsaIdToken())
+	if s.serverContext != nil {
+		s.serverContext.prearrangedTokens.remember(ext.GetNsaIdToken())
 	}
 
 	return &authpb.User{
@@ -183,6 +181,7 @@ func (s *authServer) signSessionToken(user, kind string, ttl time.Duration) (str
 		"identity_verified": false,
 	}
 	payload, err := json.Marshal(claims)
+
 	if err != nil {
 		return "", status.Error(codes.Internal, "token serialization failed")
 	}
@@ -190,11 +189,11 @@ func (s *authServer) signSessionToken(user, kind string, ttl time.Duration) (str
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	body := header + "." + base64.RawURLEncoding.EncodeToString(payload)
 	mac := hmac.New(sha256.New, s.key)
+
 	mac.Write([]byte(body))
 
 	return body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
-
 func (s *authServer) IssueToken(ctx context.Context, req *authpb.IssueTokenRequest) (*authpb.IssueTokenResponse, error) {
 	// Some guest SDK paths carry the C-string terminator into protobuf.
 	// Normalize only trailing NULs; identity comparisons remain exact.
@@ -219,14 +218,14 @@ func (s *authServer) IssueToken(ctx context.Context, req *authpb.IssueTokenReque
 	legacyName := user[:cut] + "/users/u-" + strings.TrimPrefix(derived.Name, user[:cut]+"/users/")
 
 	if !hmac.Equal([]byte(user), []byte(derived.Name)) && !hmac.Equal([]byte(user), []byte(shortName)) && !hmac.Equal([]byte(user), []byte(legacyName)) {
-		s.state.event(map[string]any{
+		s.serverContext.event(map[string]any{
 			"event":           "issue_token_rejected",
 			"reason":          "identity_mismatch",
 			"numeric_user_id": isDecimalUserID(user[cut+7:]),
 			"user_id_length":  len(user[cut+7:]),
 		})
 
-		if (len(user[cut+7:]) == 33 || (strings.HasPrefix(user[cut+7:], "u-") && len(user[cut+7:]) == 34)) && req.GetExternalIdToken().GetNsaIdToken() != "" {
+		if recoverableCachedUserID(user[cut+7:]) && req.GetExternalIdToken().GetNsaIdToken() != "" {
 			// The client caches users derived from the old, randomly generated BAAS
 			// subject. This store has no such user for the current identity. NOT_FOUND
 			// lets the SDK register again; never issue a token for an unrelated user.
@@ -238,11 +237,13 @@ func (s *authServer) IssueToken(ctx context.Context, req *authpb.IssueTokenReque
 
 	ttl := 15 * time.Minute
 	access, err := s.signSessionToken(user, "access", ttl)
+
 	if err != nil {
 		return nil, err
 	}
 
 	refresh, err := s.signSessionToken(user, "refresh", time.Hour)
+
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +254,7 @@ func (s *authServer) IssueToken(ctx context.Context, req *authpb.IssueTokenReque
 		rpcID = r.id
 	}
 
-	s.state.event(map[string]any{
+	s.serverContext.event(map[string]any{
 		"event":                 "issue_token",
 		"rpc_id":                rpcID,
 		"identity_verified":     false,
@@ -285,10 +286,7 @@ func isDecimalUserID(id string) bool {
 	return true
 }
 
-func (s *authServer) IssuePrearrangedUserToken(
-	ctx context.Context,
-	req *authpb.IssuePrearrangedUserTokenRequest,
-) (*authpb.IssuePrearrangedUserTokenResponse, error) {
+func (s *authServer) IssuePrearrangedUserToken(ctx context.Context, req *authpb.IssuePrearrangedUserTokenRequest) (*authpb.IssuePrearrangedUserTokenResponse, error) {
 	if req.GetUserIndex() < 0 || req.GetUserIndex() > 3 {
 		return nil, status.Error(codes.InvalidArgument, "player index must be 0 through 3")
 	}
@@ -304,7 +302,9 @@ func (s *authServer) IssuePrearrangedUserToken(
 
 	if req.GetUserIndex() != 0 {
 		mac := hmac.New(sha256.New, s.key)
+
 		mac.Write([]byte("prearranged\x00" + user.Name + "\x00" + strconv.Itoa(int(req.GetUserIndex()))))
+
 		digest := mac.Sum(nil)
 		user.Name = req.GetTenant() + "/users/" + hex.EncodeToString(digest[:16])
 		user.ShortId = int64(binary.BigEndian.Uint64(digest[16:24]) & 0x7fffffffffffffff)
@@ -315,16 +315,18 @@ func (s *authServer) IssuePrearrangedUserToken(
 	}
 
 	access, err := s.signSessionToken(user.Name, "access", 15*time.Minute)
+
 	if err != nil {
 		return nil, err
 	}
 
 	refresh, err := s.signSessionToken(user.Name, "refresh", time.Hour)
+
 	if err != nil {
 		return nil, err
 	}
 
-	s.state.event(map[string]any{
+	s.serverContext.event(map[string]any{
 		"event":                 "issue_prearranged_token",
 		"player_index":          req.GetUserIndex(),
 		"identity_verified":     false,
@@ -353,6 +355,7 @@ func parseExternalIdentity(token string) (string, bool) {
 	}
 
 	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+
 	if err != nil {
 		return "", false
 	}
@@ -364,6 +367,7 @@ func parseExternalIdentity(token string) (string, bool) {
 	}
 
 	pid, err := strconv.ParseUint(fields[0], 10, 64)
+
 	if err != nil || pid == 0 {
 		return "", false
 	}
@@ -379,7 +383,6 @@ func (s *authServer) RefreshToken(ctx context.Context, req *authpb.RefreshTokenR
 	invalid := func() (*authpb.RefreshTokenResponse, error) {
 		return nil, status.Error(codes.Unauthenticated, "invalid refresh token")
 	}
-
 	raw := req.GetRefreshToken()
 	parts := strings.Split(raw, ".")
 
@@ -388,11 +391,13 @@ func (s *authServer) RefreshToken(ctx context.Context, req *authpb.RefreshTokenR
 	}
 
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+
 	if err != nil {
 		return invalid()
 	}
 
 	mac := hmac.New(sha256.New, s.key)
+
 	mac.Write([]byte(parts[0] + "." + parts[1]))
 
 	if !hmac.Equal(sig, mac.Sum(nil)) {
@@ -400,6 +405,7 @@ func (s *authServer) RefreshToken(ctx context.Context, req *authpb.RefreshTokenR
 	}
 
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+
 	if err != nil {
 		return invalid()
 	}
@@ -409,13 +415,7 @@ func (s *authServer) RefreshToken(ctx context.Context, req *authpb.RefreshTokenR
 		Exp                         int64
 	}
 
-	if json.Unmarshal(payload, &c) != nil ||
-		c.Iss != "nextendo-jamboree-diagnostic" ||
-		c.Aud != "jamboree-diagnostic-only" ||
-		c.Kind != "refresh" ||
-		c.Tenant != "t-adf89f68-lp1" ||
-		c.Exp <= time.Now().Unix() ||
-		c.Sub == "" {
+	if json.Unmarshal(payload, &c) != nil || c.Iss != "nextendo-jamboree-diagnostic" || c.Aud != "jamboree-diagnostic-only" || c.Kind != "refresh" || c.Tenant != "t-adf89f68-lp1" || c.Exp <= time.Now().Unix() || c.Sub == "" {
 		return invalid()
 	}
 
@@ -436,16 +436,18 @@ func (s *authServer) RefreshToken(ctx context.Context, req *authpb.RefreshTokenR
 	}
 
 	access, err := s.signSessionToken(c.Sub, "access", 15*time.Minute)
+
 	if err != nil {
 		return nil, err
 	}
 
 	refresh, err := s.signSessionToken(c.Sub, "refresh", time.Hour)
+
 	if err != nil {
 		return nil, err
 	}
 
-	s.state.event(map[string]any{
+	s.serverContext.event(map[string]any{
 		"event":       "auth_refresh_token",
 		"ttl_seconds": 900,
 	})

@@ -25,6 +25,7 @@ type friendsServer struct {
 
 func (s *friendsServer) ActivateUser(ctx context.Context, req *fr.ActivateUserRequest) (*fr.ActivateUserResponse, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
+
 	if e != nil {
 		return nil, e
 	}
@@ -53,19 +54,25 @@ func (s *friendsServer) ActivateUser(ctx context.Context, req *fr.ActivateUserRe
 	}
 
 	s.active[owner] = time.Now().Add(15 * time.Minute)
-	s.p.event(map[string]any{"event": "friends_user_activated"})
+
+	s.p.event(map[string]any{
+		"event": "friends_user_activated",
+	})
 
 	return &fr.ActivateUserResponse{}, nil
 }
 
 func (s *friendsServer) SubscribeFriendUsers(req *fr.SubscribeFriendUsersRequest, stream grpc.ServerStreamingServer[fr.SubscribeFriendUsersResponse]) error {
-	if _, e := s.ActivateUser(stream.Context(), &fr.ActivateUserRequest{Name: req.GetUser()}); e != nil {
+	if _, e := s.ActivateUser(stream.Context(), &fr.ActivateUserRequest{
+		Name: req.GetUser(),
+	}); e != nil {
 		return e
 	}
 
 	owner, _ := callerIdentity(stream.Context(), s.p.identityKey)
 	send := func() error {
 		response := s.publicRoomHosts(owner)
+
 		s.p.event(map[string]any{
 			"event": "public_room_hosts",
 			"count": len(response.FriendAccounts),
@@ -94,7 +101,6 @@ func (s *friendsServer) SubscribeFriendUsers(req *fr.SubscribeFriendUsersRequest
 			if _, e := callerIdentity(stream.Context(), s.p.identityKey); e != nil {
 				return e
 			}
-
 			if e := send(); e != nil {
 				return e
 			}
@@ -119,6 +125,8 @@ func (s *friendsServer) publicRoomHosts(owner string) *fr.SubscribeFriendUsersRe
 	seen := map[string]bool{}
 
 	for _, r := range s.rooms.tickets {
+		s.rooms.expirePendingRoomJoins(r, time.Now())
+
 		if r.owner == owner || seen[r.owner] || !discoverableRoom(r) {
 			continue
 		}
@@ -130,7 +138,9 @@ func (s *friendsServer) publicRoomHosts(owner string) *fr.SubscribeFriendUsersRe
 
 		if s.p != nil {
 			s.p.mu.Lock()
+
 			accountID := s.p.accountIDs[user]
+
 			s.p.mu.Unlock()
 
 			if accountID != "" {
@@ -167,6 +177,7 @@ func (s *friendsServer) publicRoomHosts(owner string) *fr.SubscribeFriendUsersRe
 
 func (s *friendsServer) ListFriendUsers(ctx context.Context, req *fr.ListFriendUsersRequest) (*fr.ListFriendUsersResponse, error) {
 	owner, e := callerIdentity(ctx, s.p.identityKey)
+
 	if e != nil {
 		return nil, e
 	}

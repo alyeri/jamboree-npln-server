@@ -34,14 +34,12 @@ import (
 var serverVersion = "development"
 
 type rpcKey struct{}
-
 type rpcState struct {
 	id      uint64
 	method  string
 	started time.Time
 	in, out atomic.Int64
 }
-
 type serverContext struct {
 	prearrangedTokens prearrangedTokenCache
 	capture           *rpcCapture
@@ -76,7 +74,6 @@ func tenant(ctx context.Context) string {
 
 	return "absent"
 }
-
 func safeMethod(s string) string {
 	if len(s) > 256 || !strings.HasPrefix(s, "/") {
 		return "invalid-method"
@@ -90,13 +87,13 @@ func safeMethod(s string) string {
 
 	return s
 }
-
 func (p *serverContext) TagRPC(ctx context.Context, i *stats.RPCTagInfo) context.Context {
 	r := &rpcState{
 		id:      p.next.Add(1),
 		method:  safeMethod(i.FullMethodName),
 		started: time.Now(),
 	}
+
 	p.event(map[string]any{
 		"event":  "rpc_start",
 		"rpc_id": r.id,
@@ -106,7 +103,6 @@ func (p *serverContext) TagRPC(ctx context.Context, i *stats.RPCTagInfo) context
 
 	return context.WithValue(ctx, rpcKey{}, r)
 }
-
 func (p *serverContext) HandleRPC(ctx context.Context, s stats.RPCStats) {
 	r, _ := ctx.Value(rpcKey{}).(*rpcState)
 
@@ -156,21 +152,22 @@ func (p *serverContext) HandleRPC(ctx context.Context, s stats.RPCStats) {
 		})
 	}
 }
-
 func (p *serverContext) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context {
 	return ctx
 }
-
 func (p *serverContext) HandleConn(_ context.Context, s stats.ConnStats) {
 	switch s.(type) {
 	case *stats.ConnBegin:
-		p.event(map[string]any{"event": "connection_open"})
+		p.event(map[string]any{
+			"event": "connection_open",
+		})
 
 	case *stats.ConnEnd:
-		p.event(map[string]any{"event": "connection_close"})
+		p.event(map[string]any{
+			"event": "connection_close",
+		})
 	}
 }
-
 func (p *serverContext) unknown(_ any, stream grpc.ServerStream) error {
 	method, _ := grpc.MethodFromServerStream(stream)
 	r, _ := stream.Context().Value(rpcKey{}).(*rpcState)
@@ -207,33 +204,47 @@ func (p *serverContext) unknown(_ any, stream grpc.ServerStream) error {
 
 	return status.Error(codes.Unimplemented, "RPC not implemented by Jamboree diagnostic server")
 }
-
 func newServer(p *serverContext, extra ...grpc.ServerOption) *grpc.Server {
 	if p.capture == nil {
-		p.capture = &rpcCapture{dir: "/data/npln-captures"}
+		p.capture = &rpcCapture{
+			dir: "/data/npln-captures",
+		}
 	}
 	// Jamboree's native Gamesync channel sends HTTP/2 pings every 5000 ms.
 	// The grpc-go default (five minutes) closes it with too_many_pings.
 	opts := []grpc.ServerOption{
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 5 * time.Second}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime: 5 * time.Second,
+		}),
 		grpc.StatsHandler(p),
 		grpc.UnknownServiceHandler(p.unknown),
 		grpc.MaxRecvMsgSize(4 << 20),
 		grpc.MaxSendMsgSize(4 << 20),
 		grpc.MaxConcurrentStreams(64),
 	}
-	opts = append(opts, grpc.ForceServerCodec(&prearrangedDiagnosticCodec{p: p}))
+	opts = append(opts, grpc.ForceServerCodec(&prearrangedDiagnosticCodec{
+		p: p,
+	}))
 	opts = append(opts, extra...)
 	s := grpc.NewServer(opts...)
 
-	authpb.RegisterAuthServer(s, &authServer{state: p, key: p.identityKey})
-	authpb.RegisterUserServiceServer(s, &userServiceServer{p: p})
+	authpb.RegisterAuthServer(s, &authServer{
+		serverContext: p,
+		key:           p.identityKey,
+	})
+
+	authpb.RegisterUserServiceServer(s, &userServiceServer{
+		p: p,
+	})
+
 	ugc, err := newUgcServer(p, os.Getenv("UGC_STORE_FILE"))
+
 	if err != nil {
 		panic("cannot load diagnostic UGC store")
 	}
 
 	ugcpb.RegisterUgcstoreServer(s, ugc)
+
 	holderPath := os.Getenv("LEADERBOARD_STORE_FILE")
 
 	if holderPath == "" && os.Getenv("UGC_STORE_FILE") != "" {
@@ -241,18 +252,30 @@ func newServer(p *serverContext, extra ...grpc.ServerOption) *grpc.Server {
 	}
 
 	rankings, err := newLeaderboardServer(p, holderPath)
+
 	if err != nil {
 		panic("cannot load leaderboard holder store")
 	}
 
 	lbpb.RegisterLeaderboardServiceServer(s, rankings)
-	rooms := &gameSessionServer{p: p, tickets: map[string]*creationRecord{}}
-	frpb.RegisterFriendsServer(s, &friendsServer{p: p, rooms: rooms})
+
+	rooms := &gameSessionServer{
+		p:       p,
+		tickets: map[string]*creationRecord{},
+	}
+
+	frpb.RegisterFriendsServer(s, &friendsServer{
+		p:     p,
+		rooms: rooms,
+	})
+
 	mmpb.RegisterGameSessionServiceServer(s, rooms)
+
 	mmpb.RegisterMatchmakerServer(s, &matchmakerServer{
 		rooms:   rooms,
 		tickets: map[string]*searchRecord{},
 	})
+
 	gspb.RegisterGamesyncServer(s, &gamesyncServer{
 		p:         p,
 		rooms:     rooms,
@@ -261,12 +284,13 @@ func newServer(p *serverContext, extra ...grpc.ServerOption) *grpc.Server {
 
 	return s
 }
-
 func main() {
 	version := flag.Bool("version", false, "print build ID")
 	stunListen := flag.String("stun-listen", "", "serve basic UDP STUN Binding only")
 	turnListen := flag.String("turn-listen", "", "serve authenticated UDP TURN only")
 	latencyListen := flag.String("latency-listen", "", "serve HTTP latency probes only")
+	gamesyncRouterListen := flag.String("gamesync-router-listen", "", "route Gamesync by tenant over HTTP/2")
+
 	flag.Parse()
 
 	if *version {
@@ -275,8 +299,20 @@ func main() {
 		return
 	}
 
+	if *gamesyncRouterListen != "" {
+		if err := serveGamesyncRouter(*gamesyncRouterListen, &serverContext{
+			writer: os.Stdout,
+		}); err != nil {
+			log.Fatal(err)
+		}
+
+		return
+	}
+
 	if *latencyListen != "" {
-		if err := serveLatency(*latencyListen, &serverContext{writer: os.Stdout}); err != nil {
+		if err := serveLatency(*latencyListen, &serverContext{
+			writer: os.Stdout,
+		}); err != nil {
 			log.Fatal(err)
 		}
 
@@ -284,7 +320,9 @@ func main() {
 	}
 
 	if *stunListen != "" {
-		if err := serveSTUN(*stunListen, &serverContext{writer: os.Stdout}); err != nil {
+		if err := serveSTUN(*stunListen, &serverContext{
+			writer: os.Stdout,
+		}); err != nil {
 			log.Fatal(err)
 		}
 
@@ -293,11 +331,15 @@ func main() {
 
 	if *turnListen != "" {
 		key, err := os.ReadFile(os.Getenv("AUTH_ID_KEY_FILE"))
+
 		if err != nil || len(key) != 32 {
 			log.Fatal("TURN diagnostic identity key unavailable")
 		}
 
-		if err = serveJamboreeTURN(context.Background(), &serverContext{writer: os.Stdout, identityKey: key}, *turnListen); err != nil {
+		if err = serveJamboreeTURN(context.Background(), &serverContext{
+			writer:      os.Stdout,
+			identityKey: key,
+		}, *turnListen); err != nil {
 			log.Fatal(err)
 		}
 
@@ -317,24 +359,31 @@ func main() {
 	}
 
 	pair, err := tls.LoadX509KeyPair(cert, key)
+
 	if err != nil {
 		log.Fatal("cannot load TLS certificate/key")
 	}
 
 	identityKey, err := os.ReadFile(os.Getenv("AUTH_ID_KEY_FILE"))
+
 	if err != nil || len(identityKey) != 32 {
 		log.Fatal("AUTH_ID_KEY_FILE must contain a private 32-byte diagnostic key")
 	}
 
-	p := &serverContext{writer: os.Stdout, identityKey: identityKey}
-	cfg := &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		Certificates: []tls.Certificate{pair},
-		NextProtos:   []string{"h2"},
+	p := &serverContext{
+		writer:      os.Stdout,
+		identityKey: identityKey,
 	}
-
+	cfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		Certificates: []tls.Certificate{
+			pair,
+		},
+		NextProtos: []string{"h2"},
+	}
 	s := newServer(p, grpc.Creds(credentials.NewTLS(cfg)))
 	lis, err := net.Listen("tcp", addr)
+
 	if err != nil {
 		log.Fatal(err)
 	}

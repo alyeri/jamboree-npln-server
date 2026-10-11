@@ -21,10 +21,11 @@ import (
 )
 
 type creationRecord struct {
-	alias   *mmpb.GameSessionShortAlias
-	owner   string
-	ticket  *mmpb.GameSessionCreationTicket
-	expires time.Time
+	alias       *mmpb.GameSessionShortAlias
+	owner       string
+	ticket      *mmpb.GameSessionCreationTicket
+	expires     time.Time
+	entryClosed bool
 }
 
 type gameSessionServer struct {
@@ -63,6 +64,7 @@ func (g *gameSessionServer) CreateGameSessionCreationTicket(
 	req *mmpb.CreateGameSessionCreationTicketRequest,
 ) (*mmpb.GameSessionCreationTicket, error) {
 	owner, err := callerIdentity(ctx, g.p.identityKey)
+
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +123,11 @@ func (g *gameSessionServer) CreateGameSessionCreationTicket(
 	}
 
 	if len(ticket.UserDefinitions) == 0 {
-		ticket.UserDefinitions = []*mmpb.UserDefinition{{User: owner}}
+		ticket.UserDefinitions = []*mmpb.UserDefinition{
+			{
+				User: owner,
+			},
+		}
 	}
 
 	if len(ticket.UserDefinitions) != 1 {
@@ -149,6 +155,7 @@ func (g *gameSessionServer) CreateGameSessionCreationTicket(
 	ticket.Name = "tenants/t-adf89f68-lp1/gameSessionCreationTickets/" + hex.EncodeToString(nonce)
 	ticket.State = mmpb.GameSessionCreationTicket_PENDING
 	ticket.MatchedUserSessions = nil
+
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -167,6 +174,7 @@ func (g *gameSessionServer) CreateGameSessionCreationTicket(
 		ticket:  proto.Clone(ticket).(*mmpb.GameSessionCreationTicket),
 		expires: time.Now().Add(15 * time.Minute),
 	}
+
 	g.p.event(map[string]any{
 		"event":                 "room_creation_ticket",
 		"max_players":           ticket.GameSession.MaxParticipantCount,
@@ -195,11 +203,13 @@ func (g *gameSessionServer) TrackGameSessionCreationTicket(
 	stream grpc.ServerStreamingServer[mmpb.GameSessionCreationTicket],
 ) error {
 	owner, err := callerIdentity(stream.Context(), g.p.identityKey)
+
 	if err != nil {
 		return err
 	}
 
 	g.mu.Lock()
+
 	lookup := canonicalCreationTicket(req.GetName())
 	r := g.tickets[lookup]
 
@@ -210,6 +220,7 @@ func (g *gameSessionServer) TrackGameSessionCreationTicket(
 			"name_length":         len(req.GetName()),
 			"recognized_resource": lookup != "",
 		})
+
 		g.mu.Unlock()
 
 		return status.Error(codes.NotFound, "creation ticket not found")
@@ -257,7 +268,10 @@ func (g *gameSessionServer) TrackGameSessionCreationTicket(
 				LatencyData: cloneLatencyData(definition),
 			},
 		}
-		proof, e := (&authServer{key: g.p.identityKey}).signSessionToken(owner+"|"+userSession, "matchmaking", 15*time.Minute)
+		proof, e := (&authServer{
+			key: g.p.identityKey,
+		}).signSessionToken(owner+"|"+userSession, "matchmaking", 15*time.Minute)
+
 		if e != nil {
 			g.mu.Unlock()
 
@@ -276,6 +290,7 @@ func (g *gameSessionServer) TrackGameSessionCreationTicket(
 	}
 
 	g.mu.Unlock()
+
 	g.p.event(map[string]any{
 		"event":         "room_creation_assigned",
 		"session_state": "creating",

@@ -52,11 +52,13 @@ func verifyAccess(ctx context.Context, key []byte) error {
 	}
 
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+
 	if err != nil {
 		return status.Error(codes.Unauthenticated, "invalid token signature encoding")
 	}
 
 	mac := hmac.New(sha256.New, key)
+
 	mac.Write([]byte(parts[0] + "." + parts[1]))
 
 	if !hmac.Equal(sig, mac.Sum(nil)) {
@@ -64,6 +66,7 @@ func verifyAccess(ctx context.Context, key []byte) error {
 	}
 
 	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+
 	if err != nil {
 		return status.Error(codes.Unauthenticated, "invalid token payload encoding")
 	}
@@ -73,19 +76,12 @@ func verifyAccess(ctx context.Context, key []byte) error {
 		Exp                         int64
 	}
 
-	if json.Unmarshal(raw, &c) != nil ||
-		c.Iss != "nextendo-jamboree-diagnostic" ||
-		c.Aud != "jamboree-diagnostic-only" ||
-		c.Kind != "access" ||
-		c.Tenant != "t-adf89f68-lp1" ||
-		c.Sub == "" ||
-		c.Exp <= time.Now().Unix() {
+	if json.Unmarshal(raw, &c) != nil || c.Iss != "nextendo-jamboree-diagnostic" || c.Aud != "jamboree-diagnostic-only" || c.Kind != "access" || c.Tenant != "t-adf89f68-lp1" || c.Sub == "" || c.Exp <= time.Now().Unix() {
 		return status.Error(codes.Unauthenticated, "invalid token claims")
 	}
 
 	return nil
 }
-
 func (s *ugcServer) GetDocument(ctx context.Context, req *ugcpb.GetDocumentRequest) (*ugcpb.Document, error) {
 	if err := verifyAccess(ctx, s.p.identityKey); err != nil {
 		md, _ := metadata.FromIncomingContext(ctx)
@@ -109,11 +105,7 @@ func (s *ugcServer) GetDocument(ctx context.Context, req *ugcpb.GetDocumentReque
 	name := req.GetName()
 	valid := false
 
-	for _, prefix := range []string{
-		"tenants/current/documents/",
-		"tenants/t-adf89f68-lp1/documents/",
-		"tenants/t-adf89f68/documents/",
-	} {
+	for _, prefix := range []string{"tenants/current/documents/", "tenants/t-adf89f68-lp1/documents/", "tenants/t-adf89f68/documents/"} {
 		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
 			valid = true
 		}
@@ -141,6 +133,7 @@ func (s *ugcServer) GetDocument(ctx context.Context, req *ugcpb.GetDocumentReque
 		"request_unknown_bytes": len(req.ProtoReflect().GetUnknown()),
 		"result":                "not_found",
 	})
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

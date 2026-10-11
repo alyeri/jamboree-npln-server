@@ -37,6 +37,7 @@ func turnResponseStatus(packet []byte) (int, int, bool) {
 
 	kind := int(binary.BigEndian.Uint16(packet[:2]))
 	code := 0
+
 	for offset := 20; offset < len(packet); {
 		if offset+4 > len(packet) {
 			return 0, 0, false
@@ -144,6 +145,7 @@ func (c *observedTURNConn) ReadFrom(b []byte) (int, net.Addr, error) {
 
 func turnPassword(username string, key []byte) string {
 	mac := hmac.New(sha256.New, key)
+
 	mac.Write([]byte("jamboree-turn\x00" + username))
 
 	return base64.RawStdEncoding.EncodeToString(mac.Sum(nil))
@@ -289,7 +291,6 @@ func serveJamboreeTURN(ctx context.Context, p *serverContext, listen string) err
 	if e != nil {
 		return e
 	}
-
 	defer s.Close()
 
 	<-ctx.Done()
